@@ -73,6 +73,11 @@ TEMPLATES = [
     },
 ]
 
+AUTHENTICATION_BACKENDS = [
+    'core.accounts.backends.SchoolIDBackend',
+    'django.contrib.auth.backends.ModelBackend', # fallback for admin
+]
+
 WSGI_APPLICATION = 'lms.wsgi.application'
 
 
