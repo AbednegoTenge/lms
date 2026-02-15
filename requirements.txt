@@ -5,3 +5,5 @@ redis
 celery
 python-dotenv
 django-cors-headers
+pytest-django
+pytest

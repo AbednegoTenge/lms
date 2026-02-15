@@ -43,25 +43,6 @@ class Student(models.Model):
             models.Index(fields=['student_number']),
         ]
 
-    def save(self, *args, **kwargs):
-        from django.db import transaction
-        with transaction.atomic():
-            # Save first if new (to get ID)
-            if not self.id:
-                super().save(*args, **kwargs)
-
-            # Generate student number if not set
-            if not self.student_number:
-                self.student_number = f"STD{str(self.id).zfill(3)}"
-
-            # Final save to persist student_number
-            super().save(*args, **kwargs)
-
-            # Mirror to User.school_id
-            if self.user and not self.user.school_id:
-                self.user.school_id = self.student_number
-                self.user.save(update_fields=['school_id'])
-
 
     def __str__(self):
         return f"{self.user.get_full_name()} ({self.student_number})"
@@ -83,20 +64,7 @@ class StaffBase(models.Model):
         abstract = True
 
 
-    def save(self, *args, **kwargs):
-        from django.db import transaction
-        with transaction.atomic():
-            # Save first if new (to get ID)
-            if not self.id:
-                super().save(*args, **kwargs)
-            if not self.employee_number:
-                prefix = self.ROLE_PREFIX[self.__class__.__name__.lower()]
-                self.employee_number = f"{prefix}{str(self.id).zfill(3)}"
-            super().save(*args, **kwargs)
-            if not self.user.school_id:
-                self.user.school_id = self.employee_number
-                self.user.save()
-            
+    
 
 class Teacher(StaffBase):
     department = models.CharField(max_length=100, null=True, blank=True)
