@@ -45,3 +45,5 @@ dmypy.json
 .pyre_check/
 .pyre_configuration/
 .pyre_configuration.local/  
+scripts/
+docs/

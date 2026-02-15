@@ -77,6 +77,7 @@ AUTHENTICATION_BACKENDS = [
     'core.accounts.backends.SchoolIDBackend',
     'django.contrib.auth.backends.ModelBackend', # fallback for admin
 ]
+AUTH_USER_MODEL = 'core.User'
 
 WSGI_APPLICATION = 'lms.wsgi.application'
 
