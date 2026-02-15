@@ -1,0 +1,7 @@
+django
+djangorestframework
+psycopg2
+redis
+celery
+python-dotenv
+django-cors-headers
