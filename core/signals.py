@@ -1,6 +1,6 @@
 from django.db.models.signals import post_save
 from django.dispatch import receiver
-from .models import Student, Teacher, Admin, Principal
+from .models import Student, Teacher, Admin, Principal, Enrollment, AcademicTerm, CourseOffering
 
 @receiver(post_save, sender=Student)
 def generate_student_number(sender, instance, created, **kwargs):
@@ -44,3 +44,39 @@ def generate_employee_number_principal(sender, instance, created, **kwargs):
     if instance.user and not instance.user.school_id:
         instance.user.school_id = instance.employee_number
         instance.user.save(update_fields=['school_id'])
+
+
+@receiver(post_save, sender=Student)
+def enroll_in_core_courses(sender, instance, created, **kwargs):
+    """
+    Automatically enroll new students in core courses for their current level/term
+    """
+    if created and instance.programme:
+        try:
+            # Get current academic term
+            current_term = AcademicTerm.objects.get(is_current=True)
+            
+            # Get core course offerings for student's level and current term
+            core_offerings = CourseOffering.objects.filter(
+                course__course_type='CORE',
+                level=instance.level,
+                term=current_term.term_number,
+                is_active=True
+            )
+            
+            # Create enrollments for core courses
+            enrollments = [
+                Enrollment(
+                    student=instance, 
+                    course_offering=offering, 
+                    is_core=True
+                )
+                for offering in core_offerings
+            ]
+            
+            if enrollments:
+                Enrollment.objects.bulk_create(enrollments, ignore_conflicts=True)
+                
+        except AcademicTerm.DoesNotExist:
+            # No current term set, skip auto-enrollment
+            pass
