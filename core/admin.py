@@ -1,8 +1,11 @@
 # admin.py
 from django.contrib import admin
+from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from .models import (
     User, Student, Teacher, Admin, Principal, 
-    Programme, Course, CourseOffering, AcademicTerm, Enrollment
+    Programme, Course, CourseOffering, AcademicTerm, 
+    Enrollment, Submission, Assignment, Quiz, Question, 
+    Choice, ShortAnswerKey, QuizAttempt, StudentAnswer
 )
 
 @admin.register(Programme)
@@ -80,7 +83,318 @@ class TeacherAdmin(admin.ModelAdmin):
     get_assigned_courses.short_description = 'Assigned Courses'
 
 
+@admin.register(User)
+class UserAdmin(BaseUserAdmin):
+    model = User
 
-admin.site.register(User)
+    # Show role in the list table
+    list_display = (
+        "username",
+        "email",
+        "school_id",
+        "role",          # <- computed property
+        "is_staff",
+    )
+
+    # Make role read-only in detail page
+    readonly_fields = ("role",)
+
+    # Add role + school_id to the main user info section
+    fieldsets = BaseUserAdmin.fieldsets + (
+        ("School Information", {"fields": ("school_id", "role")}),
+    )
+
+    add_fieldsets = BaseUserAdmin.add_fieldsets + (
+        ("School Information", {"fields": ("school_id",)}),
+    )
+
+
+class SubmissionInline(admin.TabularInline):
+    model = Submission
+    extra = 0
+    fields = ['student', 'status', 'marks_obtained', 'is_graded', 'submitted_at']
+    readonly_fields = ['student', 'submitted_at', 'status']
+
+    def has_add_permission(self, request, obj=None):
+        return False  # Submissions are created by students, not admin
+
+
+@admin.register(Assignment)
+class AssignmentAdmin(admin.ModelAdmin):
+    inlines = [SubmissionInline]
+    list_display = [
+        'title', 'course_offering', 'teacher', 'status',
+        'due_date', 'total_marks', 'submission_count', 'graded_count'
+    ]
+    list_filter = [
+        'status',
+        'course_offering__level',
+        'course_offering__term',
+    ]
+    search_fields = ['title', 'course_offering__course__name', 'teacher__user__first_name']
+    readonly_fields = ['created_at', 'updated_at']
+
+    fieldsets = (
+        ('Assignment Details', {
+            'fields': ('course_offering', 'teacher', 'title', 'description', 'attachment')
+        }),
+        ('Settings', {
+            'fields': ('status', 'total_marks', 'due_date')
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+
+    def submission_count(self, obj):
+        return obj.submission_count
+    submission_count.short_description = 'Submissions'
+
+    def graded_count(self, obj):
+        return obj.graded_submission_count
+    graded_count.short_description = 'Graded'
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        """Only show active course offerings"""
+        if db_field.name == "course_offering":
+            kwargs["queryset"] = CourseOffering.objects.filter(
+                is_active=True
+            ).select_related('course')
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+class ChoiceInline(admin.TabularInline):
+    model = Choice
+    extra = 1
+    fields = ['answer', 'is_correct', 'order']
+    ordering = ['order']
+
+
+class ShortAnswerKeyInline(admin.TabularInline):
+    model = ShortAnswerKey
+    extra = 1
+    fields = ['text']
+
+
+class QuestionInline(admin.TabularInline):
+    model = Question
+    extra = 0
+    fields = ['question', 'question_type', 'marks', 'order', 'is_required']
+    ordering = ['order']
+    show_change_link = True
+
+
+@admin.register(Quiz)
+class QuizAdmin(admin.ModelAdmin):
+    list_display = [
+        'title', 'course_offering', 'teacher', 'status',
+        'get_total_marks', 'duration_minutes', 'max_attempts',
+        'start_time', 'end_time', 'is_active', 'is_past_due'
+    ]
+    list_filter = ['status', 'course_offering', 'teacher']
+    search_fields = ['title', 'description', 'course_offering__course_code']
+    readonly_fields = ['get_total_marks', 'is_active', 'is_past_due', 'created_at', 'updated_at']
+    inlines = [QuestionInline]
+
+    fieldsets = (
+        ('Basic Info', {
+            'fields': ('course_offering', 'teacher', 'title', 'description')
+        }),
+        ('Settings', {
+            'fields': ('status', 'duration_minutes', 'max_attempts')
+        }),
+        ('Schedule', {
+            'fields': ('start_time', 'end_time')
+        }),
+        ('Computed', {
+            'fields': ('get_total_marks', 'is_active', 'is_past_due', 'created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+
+    def get_total_marks(self, obj):
+        if not obj or not obj.pk:
+            return '-'
+        return obj.total_marks
+    get_total_marks.short_description = 'Total Marks'
+
+    def is_active(self, obj):
+        if not obj or not obj.pk:
+            return '-'
+        return 'Yes' if obj.is_active else 'No'
+    is_active.short_description = 'Active'
+
+    def is_past_due(self, obj):
+        if not obj or not obj.pk:
+            return '-'
+        return 'Yes' if obj.is_past_due else 'No'
+    is_past_due.short_description = 'Past Due'
+
+
+@admin.register(Question)
+class QuestionAdmin(admin.ModelAdmin):
+    list_display = [
+        'order', 'quiz', 'text_preview', 'question_type',
+        'marks', 'is_required', 'get_is_auto_gradable'
+    ]
+    list_filter = ['question_type', 'is_required', 'quiz']
+    search_fields = ['question', 'quiz__title']
+    readonly_fields = ['get_is_auto_gradable', 'created_at', 'updated_at']
+    ordering = ['quiz', 'order']
+
+    fieldsets = (
+        ('Question', {
+            'fields': ('quiz', 'question', 'question_type', 'marks', 'order', 'is_required')
+        }),
+        ('Extra', {
+            'fields': ('explanation', 'get_is_auto_gradable', 'created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+
+    def get_inlines(self, request, obj=None):
+        if obj is None:
+            return []
+        if obj.question_type == Question.QuestionType.SHORT_ANSWER:
+            return [ShortAnswerKeyInline]
+        return [ChoiceInline]
+
+    def text_preview(self, obj):
+        return obj.question[:60] + '...' if len(obj.question) > 60 else obj.question
+    text_preview.short_description = 'Question'
+
+    def get_is_auto_gradable(self, obj):
+        if not obj or not obj.pk:
+            return '-'
+        return 'Yes' if obj.is_auto_gradable else 'No'
+    get_is_auto_gradable.short_description = 'Auto Gradable'
+
+
+@admin.register(Choice)
+class ChoiceAdmin(admin.ModelAdmin):
+    list_display = ['answer', 'question', 'is_correct', 'order']
+    list_filter = ['is_correct', 'question__quiz']
+    search_fields = ['answer', 'question__question']
+    ordering = ['question', 'order']
+
+
+@admin.register(ShortAnswerKey)
+class ShortAnswerKeyAdmin(admin.ModelAdmin):
+    list_display = ['text', 'question']
+    search_fields = ['text', 'question__text']
+    list_filter = ['question__quiz']
+
+
+class StudentAnswerInline(admin.TabularInline):
+    model = StudentAnswer
+    extra = 0
+    readonly_fields = [
+        'question', 'selected_choice', 'text_answer',
+        'is_correct', 'marks_awarded'
+    ]
+    can_delete = False
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(QuizAttempt)
+class QuizAttemptAdmin(admin.ModelAdmin):
+    list_display = [
+        'student', 'quiz', 'attempt_number', 'status',
+        'marks_obtained', 'get_percentage', 'get_is_time_expired',
+        'started_at', 'submitted_at'
+    ]
+    list_filter = ['status', 'quiz', 'quiz__course_offering']
+    search_fields = ['student__student_number', 'quiz__title']
+    readonly_fields = [
+        'attempt_number', 'started_at', 'submitted_at',
+        'get_percentage', 'get_is_time_expired', 'get_is_fully_graded'
+    ]
+    inlines = [StudentAnswerInline]
+
+    fieldsets = (
+        ('Attempt Info', {
+            'fields': ('quiz', 'student', 'attempt_number', 'status')
+        }),
+        ('Marks', {
+            'fields': ('marks_obtained', 'get_percentage')
+        }),
+        ('Timing', {
+            'fields': ('started_at', 'submitted_at', 'get_is_time_expired')
+        }),
+        ('Grading', {
+            'fields': ('get_is_fully_graded',),
+            'classes': ('collapse',)
+        }),
+    )
+
+    actions = ['grade_selected_attempts']
+
+    def get_percentage(self, obj):
+        if not obj or not obj.pk:
+            return '-'
+        p = obj.percentage
+        return f'{p:.1f}%' if p is not None else '-'
+    get_percentage.short_description = 'Percentage'
+
+    def get_is_time_expired(self, obj):
+        if not obj or not obj.pk:
+            return '-'
+        return 'Yes' if obj.is_time_expired else 'No'
+    get_is_time_expired.short_description = 'Time Expired'
+
+    def get_is_fully_graded(self, obj):
+        if not obj or not obj.pk:
+            return '-'
+        return 'Yes' if obj.is_fully_graded else 'No'
+    get_is_fully_graded.short_description = 'Fully Graded'
+
+    def grade_selected_attempts(self, request, queryset):
+        for attempt in queryset:
+            attempt.auto_grade_all()
+        self.message_user(request, f"{queryset.count()} attempt(s) graded successfully.")
+    grade_selected_attempts.short_description = "Grade selected attempts"
+
+
+@admin.register(StudentAnswer)
+class StudentAnswerAdmin(admin.ModelAdmin):
+    list_display = [
+        'get_student', 'get_question', 'get_answer',
+        'is_correct', 'marks_awarded'
+    ]
+    list_filter = ['is_correct', 'question__question_type', 'attempt__quiz']
+    search_fields = [
+        'attempt__student__student_number',
+        'question__text',
+        'text_answer'
+    ]
+    readonly_fields = [
+        'attempt', 'question', 'selected_choice',
+        'text_answer', 'is_correct', 'marks_awarded'
+    ]
+
+    def has_add_permission(self, request):
+        return False
+
+    def get_student(self, obj):
+        return obj.attempt.student.student_number
+    get_student.short_description = 'Student'
+
+    def get_question(self, obj):
+        text = obj.question.text
+        return text[:50] + '...' if len(text) > 50 else text
+    get_question.short_description = 'Question'
+
+    def get_answer(self, obj):
+        if obj.text_answer:
+            return obj.text_answer[:60]
+        if obj.selected_choice:
+            return obj.selected_choice.text
+        choices = obj.selected_choices.all()
+        if choices.exists():
+            return ', '.join(c.text for c in choices)
+        return '-'
+
 admin.site.register(Admin)
 admin.site.register(Principal)
