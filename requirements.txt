@@ -7,3 +7,5 @@ python-dotenv
 django-cors-headers
 pytest-django
 pytest
+boto3
+s3transfer

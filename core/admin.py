@@ -163,6 +163,37 @@ class AssignmentAdmin(admin.ModelAdmin):
             ).select_related('course')
         return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
+@admin.register(Submission)
+class SubmissionAdmin(admin.ModelAdmin):
+    list_display = [
+        'student', 'assignment', 'status',
+        'marks_obtained', 'percentage', 'is_graded', 'submitted_at'
+    ]
+    list_filter = ['status', 'is_graded', 'assignment__course_offering__level']
+    search_fields = [
+        'student__student_number',
+        'student__user__first_name',
+        'assignment__title'
+    ]
+    readonly_fields = ['submitted_at', 'graded_at', 'percentage']
+
+    fieldsets = (
+        ('Submission Info', {
+            'fields': ('assignment', 'student', 'status', 'submitted_at')
+        }),
+        ('Submission Content', {
+            'fields': ('text_answer', 'file')
+        }),
+        ('Grading', {
+            'fields': ('is_graded', 'marks_obtained', 'percentage', 'feedback', 'graded_by', 'graded_at')
+        }),
+    )
+
+    def percentage(self, obj):
+        p = obj.percentage
+        return f"{p:.1f}%" if p else "-"
+    percentage.short_description = 'Score %'
+
 class ChoiceInline(admin.TabularInline):
     model = Choice
     extra = 1
