@@ -26,6 +26,12 @@ class User(AbstractUser):
         elif self.is_staff:
             return 'admin'
         return 'user'
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['email']),
+            models.Index(fields=['school_id']),
+        ]
     
     
 class Student(models.Model):
