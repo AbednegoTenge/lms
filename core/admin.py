@@ -7,6 +7,8 @@ from .models import (
     Enrollment, Submission, Assignment, Quiz, Question, 
     Choice, ShortAnswerKey, QuizAttempt, StudentAnswer
 )
+from django import forms
+from django.db.models import Q
 
 @admin.register(Programme)
 class ProgrammeAdmin(admin.ModelAdmin):
@@ -36,33 +38,98 @@ class AcademicTermAdmin(admin.ModelAdmin):
     list_display = ['name', 'academic_year', 'term_number', 'start_date', 'end_date', 'is_current', 'elective_selection_open']
     list_filter = ['is_current', 'elective_selection_open', 'academic_year']
     
+
+class EnrollmentInlineForm(forms.ModelForm):
+    """Filter course offerings by student's programme and level"""
+
+    class Meta:
+        model = Enrollment
+        fields = '__all__'
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        student = getattr(self, 'parent_instance', None)
+
+        if student and student.programme:
+            try:
+                current_term = AcademicTerm.objects.get(is_current=True)
+
+                self.fields['course_offering'].queryset = CourseOffering.objects.filter(
+                    Q(course__programmes=student.programme) |  # Programme electives
+                    Q(course__course_type='CORE'),              # OR all core courses
+                    level=student.level,
+                    term=current_term.term_number,
+                    is_active=True
+                ).select_related('course').order_by('course__course_type', 'course__name')
+
+            except AcademicTerm.DoesNotExist:
+                self.fields['course_offering'].queryset = CourseOffering.objects.filter(
+                    course__programmes=student.programme,
+                    level=student.level,
+                    is_active=True
+                ).select_related('course')
+        else:
+            self.fields['course_offering'].queryset = CourseOffering.objects.none()
+
+class EnrollmentInline(admin.TabularInline):
+    model = Enrollment
+    form = EnrollmentInlineForm
+    extra = 5
+    fields = ['course_offering', 'is_core', 'grade', 'is_active']
+
+    def get_formset(self, request, obj=None, **kwargs):
+        formset = super().get_formset(request, obj, **kwargs)
+        formset.form.parent_instance = obj  # always pass student
+        return formset
+
 @admin.register(Student)
 class StudentAdmin(admin.ModelAdmin):
-    list_display = ['student_number', 'get_full_name', 'programme', 'level', 'get_enrolled_courses', 'enrollment_date']
+    inlines = [EnrollmentInline]
+    list_display = ['student_number', 'get_full_name', 'programme', 'level', 'enrollment_date']
     list_filter = ['programme', 'level', 'gender']
-    search_fields = ['student_number', 'user__first_name', 'user__last_name', 'user__email']
+    search_fields = ['student_number', 'user__first_name', 'user__last_name']
     
     def get_full_name(self, obj):
         return obj.user.get_full_name()
     get_full_name.short_description = 'Full Name'
 
-    def get_enrolled_courses(self, obj):
-        courses = obj.enrolled_courses.all()
-        if not courses:
-            return 'No courses found'
-        return ','.join([course.course_code for course in courses])
-    get_enrolled_courses.short_description = 'Enrolled Courses Count'
 
 @admin.register(Enrollment)
 class EnrollmentAdmin(admin.ModelAdmin):
-    list_display = ['student', 'get_course_code', 'is_core', 'grade', 'enrolled_date', 'is_active']
+    list_display = ['student', 'get_course_code', 'get_course_name', 'is_core', 'grade', 'is_active']
     list_filter = ['is_core', 'is_active', 'course_offering__level', 'course_offering__term']
     search_fields = ['student__student_number', 'student__user__first_name', 'course_offering__course__name']
     
     def get_course_code(self, obj):
         return obj.course_offering.course_code
     get_course_code.short_description = 'Course Code'
-
+    
+    def get_course_name(self, obj):
+        return obj.course_offering.course.name
+    get_course_name.short_description = 'Course Name'
+    
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == "course_offering":
+            # Get student_id from URL if editing enrollment
+            if request.resolver_match.kwargs.get('object_id'):
+                try:
+                    enrollment = Enrollment.objects.get(pk=request.resolver_match.kwargs['object_id'])
+                    student = enrollment.student
+                    
+                    # ✅ Filter by student's programme and level
+                    if student.programme:
+                        current_term = AcademicTerm.objects.get(is_current=True)
+                        kwargs["queryset"] = CourseOffering.objects.filter(
+                            course__programmes=student.programme,
+                            level=student.level,
+                            term=current_term.term_number,
+                            is_active=True
+                        ).select_related('course')
+                except (Enrollment.DoesNotExist, AcademicTerm.DoesNotExist):
+                    pass
+        
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
 @admin.register(Teacher)
 class TeacherAdmin(admin.ModelAdmin):
