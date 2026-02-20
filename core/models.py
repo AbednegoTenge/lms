@@ -3,6 +3,14 @@ from django.contrib.auth.models import AbstractUser
 
 # Create your models here.
 
+def assignment_attachment_path(instance, filename):
+    # File will be uploaded to MEDIA_ROOT/assignments/<course_code>/<assignment_id>/<filename>
+    return f'assignments/{instance.course_offering.course_code}/{instance.id}/{filename}'
+
+def submission_file_path(instance, filename):
+    # File will be uploaded to MEDIA_ROOT/submissions/<course_code>/<assignment_id>/<student_number>/<filename>
+    return f'submissions/{instance.assignment.course_offering.course_code}/{instance.assignment.id}/{instance.student.student_number}/{filename}'
+
 class User(AbstractUser):
     email = models.EmailField(unique=True)
     school_id = models.CharField(max_length=20, unique=True, null=True, blank=True)
@@ -250,7 +258,7 @@ class Assignment(models.Model):
     title = models.CharField(max_length=200)
     description = models.TextField(blank=True)
     attachment = models.FileField(
-        upload_to='assignments/', 
+        upload_to=assignment_attachment_path, 
         null=True, 
         blank=True, 
         help_text="Optional file attachment for the assignment"
@@ -330,7 +338,7 @@ class Submission(models.Model):
         help_text="Written answer if applicable"
     )
     file = models.FileField(
-        upload_to='submissions/',
+        upload_to=submission_file_path,
         null=True,
         blank=True,
         help_text="File submission if applicable"
