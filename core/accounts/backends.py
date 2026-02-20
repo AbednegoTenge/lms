@@ -3,9 +3,9 @@ from core.models import User
 
 class SchoolIDBackend(BaseBackend):
     """Authenticate using school_id."""
-    def authenticate(self, request, school_id=None, password=None, **kwargs):
+    def authenticate(self, request, username=None, password=None, **kwargs):
         try:
-            user = User.objects.get(school_id=school_id)
+            user = User.objects.get(school_id=username)
             if user.check_password(password):
                 return user
         except User.DoesNotExist:
