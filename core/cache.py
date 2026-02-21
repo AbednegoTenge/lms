@@ -338,3 +338,13 @@ def invalidate_enrollment_caches(enrollment) -> None:
 
     for teacher in enrollment.course_offering.assigned_teachers.all():
         invalidate_teacher_cache(teacher)
+
+def invalidate_submission_caches(submission) -> None:
+    """
+    Wipe caches affected by a create / update on a Submission.
+
+    Touches the student and the parent offering (which aggregates submission
+    stats on the principal dashboard).
+    """
+    invalidate_student_cache(submission.student)
+    invalidate_offering_cache(submission.assignment.course_offering_id)
