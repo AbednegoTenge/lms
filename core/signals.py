@@ -1,14 +1,6 @@
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from .models import User, Student, Teacher, Admin, Principal, Enrollment, AcademicTerm, CourseOffering
-from django.core.cache import cache
-
-@receiver(post_save, sender=User)
-def invalidate_user_cache(sender, instance, **kwargs):
-    """Invalidate cache for user data when a User instance is saved"""
-    if instance.school_id:
-        cache_key = f"login:{instance.get_role_display()}:{instance.school_id}"
-        cache.delete(cache_key)
 
 @receiver(post_save, sender=Student)
 def generate_student_number(sender, instance, created, **kwargs):
