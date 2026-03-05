@@ -11,6 +11,10 @@ def submission_file_path(instance, filename):
     # File will be uploaded to MEDIA_ROOT/submissions/<course_code>/<assignment_id>/<student_number>/<filename>
     return f'submissions/{instance.assignment.course_offering.course_code}/{instance.assignment.id}/{instance.student.student_number}/{filename}'
 
+def course_resource_file_path(instance, filename):
+    return f'course_resources/{instance.course_offering.course_code}/{instance.course_offering.term}/{instance.type}/{filename}'
+
+
 class User(AbstractUser):
     email = models.EmailField(unique=True)
     school_id = models.CharField(max_length=20, unique=True, null=True, blank=True)
@@ -183,6 +187,7 @@ class CourseOffering(models.Model):
     level = models.IntegerField(choices=LEVEL_CHOICES)
     term = models.IntegerField(choices=TERM_CHOICES)
     is_active = models.BooleanField(default=True)
+    weeks = models.CharField(max_length=30)
     
     @property
     def course_code(self):
@@ -191,7 +196,18 @@ class CourseOffering(models.Model):
     
     def __str__(self):
         return f"{self.course_code} - {self.course.name}"
-    
+
+    @property
+    def progress(self):
+        outlines = self.outline.all()
+        total = outlines.count()
+        if total == 0:
+            return 0
+        completed = outlines.filter(
+            status=CourseOutline.StatusChoices.COMPLETED
+        ).count()
+        return round((completed / total) * 100)
+
     class Meta:
         unique_together = ['course', 'level', 'term']
         ordering = ['level', 'term', 'course__name']
@@ -199,6 +215,53 @@ class CourseOffering(models.Model):
             models.Index(fields=['level', 'term']),
         ]
 
+class CourseOutline(models.Model):
+    course_offering = models.ForeignKey(CourseOffering, on_delete=models.CASCADE, related_name='outline')
+    week = models.PositiveIntegerField()
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    topics = models.JSONField(default=list)
+
+    class StatusChoices(models.TextChoices):
+        COMPLETED = 'completed',   'Completed'
+        IN_PROGRESS = 'in-progress', 'In Progress'
+        UPCOMING = 'upcoming',    'Upcoming'
+
+    status = models.CharField(
+        max_length=20,
+        choices=StatusChoices.choices,
+        default=StatusChoices.UPCOMING
+    )
+
+    class Meta:
+        ordering      = ['week']
+        unique_together = ['course_offering', 'week']
+
+    def __str__(self):
+        return f"{self.course_offering.course_code} — Week {self.week}: {self.title}"
+
+
+class CourseResource(models.Model):
+    course_offering = models.ForeignKey(CourseOffering, on_delete=models.CASCADE, related_name='resources')
+    title = models.CharField(max_length=255)
+
+    class TypeChoices(models.TextChoices):
+        PPTX    = 'pptx',    'PPTX'
+        PDF      = 'pdf',      'PDF'
+        VIDEO    = 'video',    'Video'
+        DOCUMENT = 'document', 'Document'
+        LINK     = 'link',     'Link'
+
+    type = models.CharField(max_length=20, choices=TypeChoices.choices)
+    url  = models.URLField(blank=True)
+    file = models.FileField(upload_to=course_resource_file_path, blank=True, null=True)
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-uploaded_at']
+
+    def __str__(self):
+        return f"{self.course_offering.course_code} — {self.title} ({self.type})"
 
 class AcademicTerm(models.Model):
     """Track current academic term"""
@@ -573,7 +636,20 @@ class Question(models.Model):
     def clean(self):
         from django.core.exceptions import ValidationError
         if self.quiz.status != Quiz.StatusChoices.DRAFT:
-            raise ValidationError("Questions can only be added or edited while the quiz is in Draft status.")
+            if self._state.adding:
+                raise ValidationError("Questions can only be added while the quiz is in Draft status.")
+            # Only block if question fields are actually changing
+            if self.pk:
+                try:
+                    original = Question.objects.get(pk=self.pk)
+                    fields_changed = any(
+                        getattr(self, f) != getattr(original, f)
+                        for f in ['question', 'question_type', 'marks', 'order', 'explanation', 'is_required']
+                    )
+                    if fields_changed:
+                        raise ValidationError("Questions can only be edited while the quiz is in Draft status.")
+                except Question.DoesNotExist:
+                    pass
 
     def save(self, *args, **kwargs):
         if not self.order:
