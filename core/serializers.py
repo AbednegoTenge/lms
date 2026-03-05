@@ -3,7 +3,8 @@ from .models import (
     User, Student, Teacher, Principal,
     Programme, Course, CourseOffering, AcademicTerm, 
     Enrollment, Assignment, Submission, Quiz, Question, 
-    Choice, ShortAnswerKey, QuizAttempt, StudentAnswer
+    Choice, ShortAnswerKey, QuizAttempt, StudentAnswer,
+    CourseResource, CourseOutline
 )
 
 
@@ -59,13 +60,14 @@ class StudentSerializer(serializers.ModelSerializer):
     """Student serializer - handles everything"""
     user = UserSerializer()
     full_name = serializers.SerializerMethodField(read_only=True)
+    programme = serializers.StringRelatedField()
     
     class Meta:
         model = Student
         fields = [
             'id', 'user', 'full_name', 'student_number', 'date_of_birth',
             'enrollment_date', 'gender', 'guardian_name', 'guardian_contact',
-            'level', 'current_gpa', 'cumulative_gpa'
+            'level', 'current_gpa', 'cumulative_gpa', 'programme'
         ]
         read_only_fields = ['student_number']
     
@@ -196,12 +198,23 @@ class CourseOfferingSerializer(serializers.ModelSerializer):
     course_name = serializers.CharField(source='course.name', read_only=True)
     course_code = serializers.CharField(read_only=True)
     course_type = serializers.CharField(source='course.course_type', read_only=True)
+    progress = serializers.ReadOnlyField()
     
     class Meta:
         model = CourseOffering
         fields = ['id', 'course', 'course_name', 'course_code', 'course_type', 
-                  'level', 'term', 'is_active']
+                  'level', 'term', 'is_active', 'progress']
 
+class CourseOutlineSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = CourseOutline
+        fields = ['id', 'week', 'title', 'description', 'topics', 'status']
+
+
+class CourseResourceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = CourseResource
+        fields = ['id', 'title', 'type', 'url', 'file', 'uploaded_at']
 
 class AcademicTermSerializer(serializers.ModelSerializer):
     class Meta:
