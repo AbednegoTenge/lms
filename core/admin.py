@@ -5,7 +5,8 @@ from .models import (
     User, Student, Teacher, Admin, Principal, 
     Programme, Course, CourseOffering, AcademicTerm, 
     Enrollment, Submission, Assignment, Quiz, Question, 
-    Choice, ShortAnswerKey, QuizAttempt, StudentAnswer
+    Choice, ShortAnswerKey, QuizAttempt, StudentAnswer,
+    CourseOutline, CourseResource
 )
 from django import forms
 from django.db.models import Q
@@ -14,6 +15,16 @@ from django.db.models import Q
 class ProgrammeAdmin(admin.ModelAdmin):
     list_display = ['name', 'code', 'max_electives_per_term']
     search_fields = ['name', 'code']
+
+class CourseOutlineInline(admin.TabularInline):
+    model  = CourseOutline
+    extra  = 1
+    fields = ['week', 'title', 'description', 'topics', 'status']
+
+class CourseResourceInline(admin.TabularInline):
+    model  = CourseResource
+    extra  = 1
+    fields = ['title', 'type', 'url', 'file']
 
 @admin.register(Course)
 class CourseAdmin(admin.ModelAdmin):
@@ -24,7 +35,8 @@ class CourseAdmin(admin.ModelAdmin):
 
 @admin.register(CourseOffering)
 class CourseOfferingAdmin(admin.ModelAdmin):
-    list_display = ['get_course_code', 'course', 'level', 'term', 'is_active']
+    inlines = [CourseOutlineInline, CourseResourceInline]
+    list_display = ['get_course_code', 'course', 'level', 'term', 'is_active', 'progress']
     list_filter = ['level', 'term', 'is_active', 'course__course_type']
     search_fields = ['course__name', 'course__code_prefix']
     
@@ -32,6 +44,13 @@ class CourseOfferingAdmin(admin.ModelAdmin):
         return obj.course_code
     get_course_code.short_description = 'Course Code'
     get_course_code.admin_order_field = 'course__code_prefix'
+
+
+@admin.register(CourseOutline)
+class CourseOutlineAdmin(admin.ModelAdmin):
+    list_display  = ['course_offering', 'week', 'title', 'status', 'topics', 'description']
+    list_filter   = ['status', 'course_offering']
+    search_fields = ['title', 'course_offering__course_code']
 
 @admin.register(AcademicTerm)
 class AcademicTermAdmin(admin.ModelAdmin):
