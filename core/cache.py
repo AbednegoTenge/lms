@@ -61,6 +61,12 @@ CACHE_TTL = {
     "offering_quizzes":     60 * 10,
 
     "my_enrollments":       60 * 10,
+    "quiz_detail":          60 * 10,
+    "quiz_questions":       60 * 10,
+    "quiz_attempts":        60 * 10,
+    "attempt_detail":       60 * 10,
+    "my_attempts":          60 * 10,
+    "attempt_result":       60 * 30,
 }
 
 
@@ -209,6 +215,38 @@ class CacheKeys:
     def offering_quizzes(offering_id: int) -> str:
         return f"lms:offering:{offering_id}:quizzes"
 
+    @staticmethod
+    def quiz_detail(quiz_id):
+        return f"quiz_{quiz_id}_detail"
+
+    @staticmethod
+    def quiz_questions(quiz_id: int) -> str:
+        return f"lms:quiz:{quiz_id}:questions"
+
+    @staticmethod
+    def quiz_attempts(quiz_id: int) -> str:
+        return f"lms:quiz:{quiz_id}:attempts"
+
+    @staticmethod
+    def teacher_quizzes(teacher_id: int) -> str:
+        return f"lms:teacher:{teacher_id}:quizzes"
+
+    @staticmethod
+    def student_quizzes(student_id: int) -> str:
+        return f"lms:student:{student_id}:quizzes"
+
+    @staticmethod
+    def attempt_detail(attempt_id: int) -> str:
+        return f"lms:attempt:{attempt_id}:detail"
+
+    @staticmethod
+    def attempt_result(attempt_id: int) -> str:
+        return f"lms:attempt:{attempt_id}:result"
+
+    @staticmethod
+    def my_attempts(student_id: int, quiz_id="all") -> str:
+        return f"lms:student:{student_id}:attempts:{quiz_id}"
+
 
 # ==================== INVALIDATION HELPERS ====================
 # Each helper deletes the full set of keys that become stale when the
@@ -348,3 +386,53 @@ def invalidate_submission_caches(submission) -> None:
     """
     invalidate_student_cache(submission.student)
     invalidate_offering_cache(submission.assignment.course_offering_id)
+
+def invalidate_quiz_caches(quiz) -> None:
+    """
+    Wipe caches affected by a create / update / delete on a Quiz.
+
+    Touches:
+      • The quiz's own detail and question list caches
+      • The parent offering's quiz list cache (and dashboard)
+      • The authoring teacher's quiz list cache
+      • Every enrolled student's personal quiz list cache
+    """
+    from .models import Enrollment, Student  # local import avoids circular deps
+
+    cache.delete_many([
+        CacheKeys.quiz_detail(quiz.id),
+        CacheKeys.quiz_questions(quiz.id),
+        CacheKeys.teacher_quizzes(quiz.teacher_id),
+    ])
+    invalidate_offering_cache(quiz.course_offering_id)
+
+    student_ids = (
+        Enrollment.objects
+        .filter(course_offering_id=quiz.course_offering_id, is_active=True)
+        .values_list("student_id", flat=True)
+    )
+    keys = [
+        CacheKeys.student_quizzes(sid)
+        for sid in Student.objects.filter(id__in=student_ids).values_list("id", flat=True)
+    ]
+    if keys:
+        cache.delete_many(keys)
+
+
+def invalidate_attempt_caches(attempt) -> None:
+    """
+    Wipe caches affected by a create / update on a QuizAttempt.
+
+    Touches:
+      • The attempt's own detail and result caches
+      • The student's attempt list for this quiz
+      • The quiz-level attempts list (teacher overview)
+    """
+    cache.delete_many([
+        CacheKeys.attempt_detail(attempt.id),
+        CacheKeys.attempt_result(attempt.id),
+        CacheKeys.my_attempts(attempt.student_id, attempt.quiz_id),
+        CacheKeys.my_attempts(attempt.student_id, "all"),
+        CacheKeys.quiz_attempts(attempt.quiz_id),
+        CacheKeys.principal_dashboard(),
+    ])

@@ -827,8 +827,8 @@ class QuizAttempt(models.Model):
         if self.pk:
             return
 
-        if not self.quiz.is_active:
-            raise ValidationError("This quiz is not currently active.")
+        if self.quiz.status != Quiz.StatusChoices.PUBLISHED:
+            raise ValidationError("This quiz is not currently available.")
 
         attempt_count = QuizAttempt.objects.filter(
             quiz=self.quiz,
@@ -839,8 +839,6 @@ class QuizAttempt(models.Model):
             raise ValidationError(
                 f"Maximum attempts ({self.quiz.max_attempts}) reached for this quiz."
             )
-
-        self.attempt_number = attempt_count + 1
 
     def save(self, *args, **kwargs):
         from django.utils import timezone
@@ -989,3 +987,25 @@ class StudentAnswer(models.Model):
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
+
+class GradeWeight(models.Model):
+    course_offering = models.OneToOneField(
+        CourseOffering,
+        on_delete=models.CASCADE,
+        related_name='grade_weight'
+    )
+    assignments_weight = models.PositiveIntegerField(
+        default=50,
+        help_text="Percentage weight for assignments (0-100)"
+    )
+    quizzes_weight = models.PositiveIntegerField(
+        default=50,
+        help_text="Percentage weight for quizzes (0-100)"
+    )
+
+    class Meta:
+        verbose_name = "Grade Weight"
+        verbose_name_plural = "Grade Weights"
+
+    def __str__(self):
+        return f"{self.course_offering.course_code} — Assignments {self.assignments_weight}% / Quizzes {self.quizzes_weight}%"
