@@ -2,25 +2,26 @@ from rest_framework.viewsets import ModelViewSet
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework import status
 from django.contrib.auth import authenticate
 from django.core.cache import cache
+from django.db import transaction
 from django.db.models import Q
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.utils import timezone
 from .models import (
-    User, Student, Teacher, Principal, Admin,
+    User, Student, Teacher, Principal,
     Programme, Course, CourseOffering, AcademicTerm,
-    Enrollment, Assignment, Submission, Quiz, StudentAnswer,
-    QuizAttempt, Question, CourseOutline, CourseResource
+    Enrollment, Assignment, Submission, Quiz,
+    QuizAttempt, CourseOutline, CourseResource, GradeWeight
 )
 from .serializers import (
     UserSerializer, StudentSerializer, TeacherSerializer,
     PrincipalSerializer, ProgrammeSerializer, CourseSerializer,
-    CourseOfferingSerializer, AcademicTermSerializer, EnrollmentSerializer,
-    AssignmentSerializer, SubmissionSerializer, QuizSerializer, ChoiceSerializer,
-    StudentAnswerSerializer, ShortAnswerKeySerializer, QuestionSerializer,
+    CourseOfferingSerializer,EnrollmentSerializer,
+    AssignmentSerializer, SubmissionSerializer, QuizSerializer,
+    QuestionSerializer, GradebookSerializer,
     QuizAttemptSerializer, CourseResourceSerializer, CourseOutlineSerializer
 )
 from .permissions import (
@@ -40,6 +41,8 @@ from .cache import (
     invalidate_attempt_caches,
     invalidate_quiz_caches
 )
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db.models import Max
 
 
 def get_current_term():
@@ -906,6 +909,130 @@ class CourseOfferingViewSet(ModelViewSet):
             cache.set(cache_key, data, CACHE_TTL.get("offering_stats", 300))
 
         return Response(data)
+
+    @action(detail=True, methods=["get"])
+    def gradebook(self, request, pk=None):
+        offering = self.get_object()
+        student  = request.user.student
+
+        # ── Weights ───────────────────────────────────────────────────
+        try:
+            weights           = offering.grade_weight
+            assignment_weight = weights.assignments_weight
+            quiz_weight       = weights.quizzes_weight
+        except GradeWeight.DoesNotExist:
+            assignment_weight = 50
+            quiz_weight       = 50
+
+        # ── Assignments ───────────────────────────────────────────────
+        assignment_entries        = []
+        assignment_marks_obtained = 0
+        assignment_marks_total    = 0
+
+        if assignment_weight > 0:
+            assignments = Assignment.objects.filter(
+                course_offering=offering,
+                status=Assignment.StatusChoices.PUBLISHED
+            )
+            for a in assignments:
+                submission = a.submissions.filter(student=student).first()
+                marks      = float(submission.marks_obtained) if submission and submission.is_graded and submission.marks_obtained is not None else None
+                percentage = float(submission.percentage)     if submission and submission.percentage else None
+                assignment_entries.append({
+                    "id":             a.id,
+                    "category":       "Assignment",
+                    "title":          a.title,
+                    "total_marks":    a.total_marks,
+                    "marks_obtained": marks,
+                    "percentage":     percentage,
+                    "status":         "graded"    if submission and submission.is_graded
+                                    else "submitted" if submission
+                                    else "pending",
+                })
+                if marks is not None:
+                    assignment_marks_obtained += marks
+                    assignment_marks_total    += a.total_marks
+
+        # ── Quizzes ───────────────────────────────────────────────────
+        quiz_entries        = []
+        quiz_marks_obtained = 0
+        quiz_marks_total    = 0
+
+        if quiz_weight > 0:
+            quizzes = Quiz.objects.filter(
+                course_offering=offering,
+                status=Quiz.StatusChoices.PUBLISHED
+            )
+            for q in quizzes:
+                attempt    = QuizAttempt.objects.filter(quiz=q, student=student).order_by('-marks_obtained').first()
+                marks      = float(attempt.marks_obtained) if attempt and attempt.marks_obtained is not None else None
+                percentage = float(attempt.percentage)     if attempt and attempt.percentage is not None else None
+                quiz_entries.append({
+                    "id":             q.id,
+                    "category":       "Quiz",
+                    "title":          q.title,
+                    "total_marks":    q.total_marks,
+                    "marks_obtained": marks,
+                    "percentage":     percentage,
+                    "status":         "graded"    if attempt and attempt.status == QuizAttempt.StatusChoices.GRADED
+                                    else "submitted" if attempt and attempt.status == QuizAttempt.StatusChoices.SUBMITTED
+                                    else "pending",
+                })
+                if marks is not None:
+                    quiz_marks_obtained += marks
+                    quiz_marks_total    += q.total_marks
+
+        # ── Overall grade (only weight categories that have graded entries) ───
+        active_weight  = 0
+        weighted_score = 0
+        assignment_score = 0
+        quiz_score       = 0
+
+        if assignment_marks_total > 0:
+            assignment_score  = (assignment_marks_obtained / assignment_marks_total * 100)
+            weighted_score   += assignment_score * assignment_weight
+            active_weight    += assignment_weight
+
+        if quiz_marks_total > 0:
+            quiz_score        = (quiz_marks_obtained / quiz_marks_total * 100)
+            weighted_score   += quiz_score * quiz_weight
+            active_weight    += quiz_weight
+
+        weighted_score     = (weighted_score / active_weight) if active_weight > 0 else 0
+        has_graded_entries = active_weight > 0
+        letter_grade       = self._score_to_letter(weighted_score) if has_graded_entries else "N/A"
+
+        data = {
+            "course_code": offering.course_code,
+            "course_name": offering.course.name,
+            "weights": {
+                "assignments": assignment_weight,
+                "quizzes":     quiz_weight,
+                "total":       assignment_weight + quiz_weight,
+            },
+            "summary": {
+                "assignment_score": round(assignment_score, 2) if assignment_marks_total > 0 else None,
+                "quiz_score":       round(quiz_score, 2)       if quiz_marks_total > 0       else None,
+                "overall_score":    round(weighted_score, 2)   if has_graded_entries         else None,
+                "letter_grade":     letter_grade,
+            },
+            "entries": assignment_entries + quiz_entries,
+        }
+
+        serializer = GradebookSerializer(data)
+        return Response(serializer.data)
+
+    @staticmethod
+    def _score_to_letter(score: float) -> str:
+        if score >= 80: return 'A'
+        if score >= 75: return 'B+'
+        if score >= 70: return 'B'
+        if score >= 65: return 'C+'
+        if score >= 60: return 'C'
+        if score >= 55: return 'D+'
+        if score >= 50: return 'D'
+        if score >= 45: return 'E'
+        return 'F'
     
 class EnrollmentViewSet(ModelViewSet):
     queryset = Enrollment.objects.select_related(
@@ -1162,8 +1289,11 @@ class SubmissionViewSet(ModelViewSet):
         return queryset.none()
 
     def perform_create(self, serializer):
-        submission = serializer.save(student=self.request.user.student)
-        invalidate_submission_caches(submission)
+        try:
+            submission = serializer.save(student=self.request.user.student)
+            invalidate_submission_caches(submission)
+        except DjangoValidationError as e:
+            raise ValidationError(e.message_dict if hasattr(e, 'message_dict') else e.messages)
 
     def perform_update(self, serializer):
         submission = serializer.save()
@@ -1174,32 +1304,36 @@ class SubmissionViewSet(ModelViewSet):
         instance.delete()
 
 
+
 class QuizViewSet(ModelViewSet):
     """
-    CRUD for quizzes plus teacher and student-specific actions.
+    All quiz functionality — no separate QuizAttemptViewSet.
 
-    Role behaviour
-    --------------
-    Teacher  – sees only the quizzes they authored; can create, edit, delete,
-               publish/close, and view all attempts.
-    Student  – sees only PUBLISHED quizzes in their current-term enrolled
-               offerings; can start an attempt via /quizzes/{id}/start/.
-    Admin    – full access to everything.
+    Student endpoints
+    -----------------
+    POST /quizzes/{id}/start/   – open a new attempt (respects max_attempts)
+    POST /quizzes/{id}/submit/  – submit answers { attempt_id, answers[] }
+    GET  /quizzes/{id}/result/  – fetch best submitted result
+
+    Teacher endpoints
+    -----------------
+    POST /quizzes/{id}/publish/
+    POST /quizzes/{id}/close/
+    GET  /quizzes/{id}/attempts/
+    POST /quizzes/{id}/grade/   – override marks { attempt_id, answer_grades[] }
     """
 
     queryset = Quiz.objects.select_related(
-        "course_offering__course",
-        "teacher__user",
+        "course_offering__course", "teacher__user",
     ).prefetch_related("questions__choices", "questions__answer_keys").all()
     serializer_class = QuizSerializer
 
     def get_permissions(self):
         if self.action == "create":
             return [IsAuthenticated(), IsTeacher()]
-        if self.action in ["update", "partial_update", "destroy",
-                            "publish", "close", "attempts"]:
+        if self.action in ["update", "partial_update", "destroy", "publish", "close", "attempts", "grade"]:
             return [IsAuthenticated(), IsTeacherOfCourse | IsAdmin]
-        if self.action == "start":
+        if self.action in ["start", "submit", "result"]:
             return [IsAuthenticated(), IsStudent()]
         return [IsAuthenticated()]
 
@@ -1208,35 +1342,28 @@ class QuizViewSet(ModelViewSet):
     def get_queryset(self):
         user     = self.request.user
         queryset = Quiz.objects.select_related(
-            "course_offering__course",
-            "teacher__user",
+            "course_offering__course", "teacher__user",
         ).prefetch_related("questions__choices", "questions__answer_keys")
 
         if user.is_staff or user.is_superuser:
             return queryset.all()
-
         if hasattr(user, "teacher"):
             return queryset.filter(teacher=user.teacher)
-
         if hasattr(user, "student"):
             current_term = get_current_term()
             if not current_term:
                 return queryset.none()
             enrolled = get_enrolled_course_offerings(user.student, current_term)
-            quizzes = queryset.filter(
+            return queryset.filter(
                 course_offering_id__in=enrolled,
                 status=Quiz.StatusChoices.PUBLISHED,
             )
-            return quizzes
         return queryset.none()
 
-    # ── Retrieve with caching ─────────────────────────────────────────────────
+    # ── Answer-stripping ──────────────────────────────────────────────────────
+
     @staticmethod
     def _strip_answers(quiz_data: dict) -> dict:
-        """
-        Remove is_correct from choices and drop answer_keys entirely
-        so students cannot see the correct answers before submitting.
-        """
         for question in quiz_data.get("questions", []):
             for choice in question.get("choices", []):
                 choice.pop("is_correct", None)
@@ -1247,648 +1374,330 @@ class QuizViewSet(ModelViewSet):
         quiz      = self.get_object()
         cache_key = CacheKeys.quiz_detail(quiz.id)
         data      = cache.get(cache_key)
-
         if data is None:
             data = self.get_serializer(quiz).data
-            # Strip correct-answer fields when a student is fetching
             if hasattr(request.user, "student"):
                 data = self._strip_answers(data)
             cache.set(cache_key, data, CACHE_TTL["quiz_detail"])
-
         return Response(data)
 
     def list(self, request, *args, **kwargs):
         response = super().list(request, *args, **kwargs)
         if hasattr(request.user, "student"):
-            response.data = [self._strip_answers(quiz) for quiz in response.data]
+            response.data = [self._strip_answers(q) for q in response.data]
         return response
 
     # ── Write hooks ───────────────────────────────────────────────────────────
 
     def perform_create(self, serializer):
-        quiz = serializer.save(teacher=self.request.user.teacher)
-        invalidate_quiz_caches(quiz)
+        invalidate_quiz_caches(serializer.save(teacher=self.request.user.teacher))
 
     def perform_update(self, serializer):
-        quiz = serializer.save()
-        invalidate_quiz_caches(quiz)
+        invalidate_quiz_caches(serializer.save())
 
     def perform_destroy(self, instance):
         invalidate_quiz_caches(instance)
         instance.delete()
 
-    # ── Private helpers ─────────────────────────────────────────────────
+    # ── Private helpers ───────────────────────────────────────────────────────
 
     def _assert_teacher_owns_quiz(self, quiz):
-        """Raise 403 if the authenticated teacher did not author this quiz."""
         user = self.request.user
         if user.is_staff or user.is_superuser:
             return
         if hasattr(user, "teacher") and quiz.teacher != user.teacher:
             raise PermissionDenied("You did not create this quiz.")
 
-    # ── Actions ───────────────────────────────────────────────────────────────
+    def _questions_data_for_student(self, quiz):
+        """Questions serialized with correct-answer fields stripped."""
+        questions = quiz.questions.prefetch_related("choices", "answer_keys").order_by("order")
+        result = []
+        for q in questions:
+            q_data = QuestionSerializer(q).data
+            result.append({
+                **q_data,
+                "choices":     [{k: v for k, v in c.items() if k != "is_correct"}
+                                for c in q_data.get("choices", [])],
+                "answer_keys": [],
+            })
+        return result
+
+    # ── Teacher actions ───────────────────────────────────────────────────────
 
     @action(detail=True, methods=["get"])
     def questions(self, request, pk=None):
-        """
-        Return all questions for a quiz.
-
-        Students see questions without correct-answer metadata.
-        Teachers and admins see the full question including answer keys.
-        """
         quiz      = self.get_object()
         cache_key = CacheKeys.quiz_questions(quiz.id)
         data      = cache.get(cache_key)
-
         if data is None:
-            questions = quiz.questions.prefetch_related(
-                "choices", "answer_keys"
-            ).order_by("order")
-            data = QuestionSerializer(questions, many=True).data
+            qs   = quiz.questions.prefetch_related("choices", "answer_keys").order_by("order")
+            data = QuestionSerializer(qs, many=True).data
             cache.set(cache_key, data, CACHE_TTL["quiz_questions"])
-
         if hasattr(request.user, "student"):
             data = [
-                {
-                    **q,
-                    "choices":     [{k: v for k, v in c.items() if k != "is_correct"}
-                                    for c in q.get("choices", [])],
-                    "answer_keys": [],
-                }
+                {**q,
+                 "choices":     [{k: v for k, v in c.items() if k != "is_correct"} for c in q.get("choices", [])],
+                 "answer_keys": []}
                 for q in data
             ]
-
         return Response({
-            "quiz_id":        quiz.id,
-            "title":          quiz.title,
-            "total_questions": len(data),
-            "questions":      data,
+            "quiz_id": quiz.id, "title": quiz.title,
+            "total_questions": len(data), "questions": data,
         })
 
     @action(detail=True, methods=["post"])
     def publish(self, request, pk=None):
-        """
-        Transition a quiz from DRAFT → PUBLISHED.
-
-        Requires at least one question to be present.
-        Teacher only (must own the quiz).
-        """
         quiz = self.get_object()
         self._assert_teacher_owns_quiz(quiz)
-
         if quiz.status == Quiz.StatusChoices.PUBLISHED:
-            return Response(
-                {"error": "Quiz is already published."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return Response({"error": "Quiz is already published."}, status=status.HTTP_400_BAD_REQUEST)
         if not quiz.questions.exists():
-            return Response(
-                {"error": "Cannot publish a quiz with no questions."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
+            return Response({"error": "Cannot publish a quiz with no questions."}, status=status.HTTP_400_BAD_REQUEST)
         quiz.status = Quiz.StatusChoices.PUBLISHED
         quiz.save(update_fields=["status"])
         invalidate_quiz_caches(quiz)
-
-        return Response(
-            {"message": f'Quiz "{quiz.title}" is now published.'},
-            status=status.HTTP_200_OK,
-        )
+        return Response({"message": f'Quiz "{quiz.title}" is now published.'}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"])
     def close(self, request, pk=None):
-        """
-        Transition a quiz from PUBLISHED → CLOSED.
-
-        Teacher only (must own the quiz).
-        """
         quiz = self.get_object()
         self._assert_teacher_owns_quiz(quiz)
-
         if quiz.status == Quiz.StatusChoices.CLOSED:
-            return Response(
-                {"error": "Quiz is already closed."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
+            return Response({"error": "Quiz is already closed."}, status=status.HTTP_400_BAD_REQUEST)
         quiz.status = Quiz.StatusChoices.CLOSED
         quiz.save(update_fields=["status"])
         invalidate_quiz_caches(quiz)
-
-        return Response(
-            {"message": f'Quiz "{quiz.title}" has been closed.'},
-            status=status.HTTP_200_OK,
-        )
+        return Response({"message": f'Quiz "{quiz.title}" has been closed.'}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get"])
     def attempts(self, request, pk=None):
-        """
-        List all attempts on a quiz.
-
-        Teacher/admin only.  Response is cached per quiz.
-        """
+        """All attempts on this quiz. Teacher/admin only."""
         quiz      = self.get_object()
         cache_key = CacheKeys.quiz_attempts(quiz.id)
         data      = cache.get(cache_key)
-
         if data is None:
-            qs = QuizAttempt.objects.filter(
-                quiz=quiz
-            ).select_related("student__user").order_by("-started_at")
+            qs = QuizAttempt.objects.filter(quiz=quiz).select_related("student__user").order_by("-started_at")
             data = {
-                "quiz_id":       quiz.id,
-                "title":         quiz.title,
+                "quiz_id": quiz.id, "title": quiz.title,
                 "total_attempts": qs.count(),
-                "attempts":      QuizAttemptSerializer(qs, many=True).data,
+                "attempts": QuizAttemptSerializer(qs, many=True).data,
             }
             cache.set(cache_key, data, CACHE_TTL["quiz_attempts"])
-
-        return Response(data)
-
-    @action(detail=True, methods=["post"])
-    def start(self, request, pk=None):
-        """
-        Start a new attempt on a published quiz.
-
-        Student only.  Enforces:
-          - Quiz must be PUBLISHED
-          - Quiz must be within its start/end time window (if set)
-          - Student must be enrolled in the offering
-          - Student must not exceed max_attempts
-        """
-        quiz    = self.get_object()
-        student = request.user.student
-
-        # ── Guard: quiz must be published ─────────────────────────────────────
-        if quiz.status != Quiz.StatusChoices.PUBLISHED:
-            return Response(
-                {"error": "This quiz is not currently available."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # ── Guard: time window ────────────────────────────────────────────────
-        now = timezone.now()
-        if quiz.start_time and now < quiz.start_time:
-            return Response(
-                {"error": "This quiz has not started yet.",
-                 "starts_at": quiz.start_time},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if quiz.end_time and now > quiz.end_time:
-            return Response(
-                {"error": "This quiz has already ended.",
-                 "ended_at": quiz.end_time},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # ── Guard: enrollment check ───────────────────────────────────────────
-        enrolled = Enrollment.objects.filter(
-            student=student,
-            course_offering=quiz.course_offering,
-            is_active=True,
-        ).exists()
-        if not enrolled:
-            return Response(
-                {"error": "You are not enrolled in the course for this quiz."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        # ── Guard: attempt cap ────────────────────────────────────────────────
-        attempt_count = QuizAttempt.objects.filter(
-            quiz=quiz, student=student
-        ).count()
-        if quiz.max_attempts and attempt_count >= quiz.max_attempts:
-            return Response(
-                {"error": f"You have reached the maximum of "
-                           f"{quiz.max_attempts} attempt(s) for this quiz."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # ── Create attempt ────────────────────────────────────────────────────
-        attempt = QuizAttempt.objects.create(
-            quiz           = quiz,
-            student        = student,
-            attempt_number = attempt_count + 1,
-            status         = QuizAttempt.StatusChoices.IN_PROGRESS,
-            started_at     = now,
-        )
-        invalidate_attempt_caches(attempt)
-
-        # Return the quiz questions (without answers) so the client can render
-        questions = quiz.questions.prefetch_related(
-            "choices", "answer_keys"
-        ).order_by("order")
-        questions_data = [
-            {
-                **QuestionSerializer(q).data,
-                "choices":     [{k: v for k, v in c.items() if k != "is_correct"}
-                                for c in QuestionSerializer(q).data.get("choices", [])],
-                "answer_keys": [],
-            }
-            for q in questions
-        ]
-
-        return Response(
-            {
-                "attempt_id":    attempt.id,
-                "attempt_number": attempt.attempt_number,
-                "quiz_id":       quiz.id,
-                "title":         quiz.title,
-                "duration_minutes": quiz.duration_minutes,
-                "started_at":    attempt.started_at,
-                "questions":     questions_data,
-            },
-            status=status.HTTP_201_CREATED,
-        )
-
-
-# ==================== QUIZ ATTEMPT VIEWSET ====================
-
-class QuizAttemptViewSet(ModelViewSet):
-    """
-    Manage quiz attempts and answer submission.
-
-    Key actions
-    -----------
-    submit      – student submits answers and attempt is auto-graded
-    my_attempts – student lists their own attempts for a given quiz
-    result      – retrieve graded result for a completed attempt
-    grade       – teacher manually grades or overrides marks (e.g. short-answer)
-    """
-
-    queryset = QuizAttempt.objects.select_related(
-        "quiz__course_offering__course",
-        "quiz__teacher__user",
-        "student__user",
-    ).prefetch_related("answers__question", "answers__selected_choice").all()
-    serializer_class = QuizAttemptSerializer
-
-    def get_permissions(self):
-        if self.action in ["update", "partial_update", "destroy", "grade"]:
-            return [IsAuthenticated(), IsTeacherOrAdmin]
-        if self.action in ["submit", "my_attempts"]:
-            return [IsAuthenticated(), IsStudent()]
-        return [IsAuthenticated()]
-
-    # ── Queryset scoping ──────────────────────────────────────────────────────
-
-    def get_queryset(self):
-        user     = self.request.user
-        queryset = QuizAttempt.objects.select_related(
-            "quiz__course_offering__course",
-            "quiz__teacher__user",
-            "student__user",
-        ).prefetch_related("answers__question", "answers__selected_choice")
-
-        if user.is_staff or user.is_superuser:
-            return queryset.all()
-
-        if hasattr(user, "teacher"):
-            # Teachers see attempts for quizzes they authored
-            return queryset.filter(quiz__teacher=user.teacher)
-
-        if hasattr(user, "student"):
-            return queryset.filter(student=user.student)
-
-        return queryset.none()
-
-    # ── Retrieve with caching ─────────────────────────────────────────────────
-
-    def retrieve(self, request, *args, **kwargs):
-        attempt   = self.get_object()
-        cache_key = CacheKeys.attempt_detail(attempt.id)
-        data      = cache.get(cache_key)
-
-        if data is None:
-            data = self.get_serializer(attempt).data
-            cache.set(cache_key, data, CACHE_TTL["attempt_detail"])
-
-        return Response(data)
-
-    # ── Write hooks ───────────────────────────────────────────────────────────
-
-    def perform_update(self, serializer):
-        attempt = serializer.save()
-        invalidate_attempt_caches(attempt)
-
-    def perform_destroy(self, instance):
-        invalidate_attempt_caches(instance)
-        instance.delete()
-
-    # ── Private helpers ───────────────────────────────────────────────────────
-
-    @staticmethod
-    def _auto_grade(attempt: QuizAttempt) -> None:
-        """
-        Auto-grade all answerable questions on a submitted attempt.
-
-        MCQ / True-False  → matched against Choice.is_correct
-        Short answer      → compared (case-insensitive) against ShortAnswerKey
-        Multi-select      → all correct choices must be selected, none wrong
-        """
-        total_marks    = 0
-        marks_obtained = 0
-
-        answers = StudentAnswer.objects.filter(
-            attempt=attempt
-        ).select_related("question").prefetch_related(
-            "selected_choice",
-            "selected_choices",
-            "question__choices",
-            "question__answer_keys",
-        )
-
-        for answer in answers:
-            question   = answer.question
-            q_type     = question.question_type
-            max_marks  = question.marks
-            total_marks += max_marks
-            awarded    = 0
-
-            if q_type in (Question.TypeChoices.MCQ, Question.TypeChoices.TRUE_FALSE):
-                if answer.selected_choice and answer.selected_choice.is_correct:
-                    awarded = max_marks
-
-            elif q_type == Question.TypeChoices.MULTI_SELECT:
-                correct_ids = set(
-                    question.choices.filter(is_correct=True).values_list("id", flat=True)
-                )
-                selected_ids = set(
-                    answer.selected_choices.values_list("id", flat=True)
-                )
-                if selected_ids == correct_ids:
-                    awarded = max_marks
-
-            elif q_type == Question.TypeChoices.SHORT_ANSWER:
-                accepted = {
-                    k.text.strip().lower()
-                    for k in question.answer_keys.all()
-                }
-                if answer.text_answer and answer.text_answer.strip().lower() in accepted:
-                    awarded = max_marks
-                # else: leave as 0 – teacher can override via /grade/
-
-            answer.marks_awarded = awarded
-            answer.is_correct    = awarded > 0
-
-        # Bulk-save all answers in one query
-        StudentAnswer.objects.bulk_update(answers, ["marks_awarded", "is_correct"])
-
-        # Update attempt totals
-        marks_obtained       = sum(a.marks_awarded for a in answers)
-        attempt.marks_obtained = marks_obtained
-        attempt.percentage     = (
-            (marks_obtained / total_marks * 100) if total_marks else 0
-        )
-        attempt.status         = QuizAttempt.StatusChoices.SUBMITTED
-        attempt.submitted_at   = timezone.now()
-        attempt.save(update_fields=[
-            "marks_obtained", "percentage", "status", "submitted_at"
-        ])
-
-    # ── Actions ───────────────────────────────────────────────────────────────
-
-    @action(detail=True, methods=["post"])
-    def submit(self, request, pk=None):
-        """
-        Submit answers for an in-progress attempt and trigger auto-grading.
-
-        Expected request body::
-
-            {
-              "answers": [
-                {
-                  "question":        1,
-                  "selected_choice": 3,          // MCQ / T-F
-                  "selected_choices": [3, 5],    // multi-select
-                  "text_answer":     "osmosis"   // short answer
-                },
-                ...
-              ]
-            }
-
-        Returns the graded attempt with per-question marks.
-        Student only.  Can only submit an IN_PROGRESS attempt that belongs
-        to the authenticated student.
-        """
-        attempt = self.get_object()
-        student = request.user.student
-
-        # ── Guard: ownership ──────────────────────────────────────────────────
-        if attempt.student != student:
-            raise PermissionDenied("This attempt does not belong to you.")
-
-        # ── Guard: state ──────────────────────────────────────────────────────
-        if attempt.status != QuizAttempt.StatusChoices.IN_PROGRESS:
-            return Response(
-                {"error": "This attempt has already been submitted."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # ── Guard: time limit ─────────────────────────────────────────────────
-        if attempt.quiz.duration_minutes:
-            elapsed = (timezone.now() - attempt.started_at).total_seconds() / 60
-            if elapsed > attempt.quiz.duration_minutes + 1:  # 1-min grace period
-                return Response(
-                    {"error": "Time limit exceeded. Your attempt has expired."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-        answers_data = request.data.get("answers", [])
-        if not answers_data:
-            return Response(
-                {"error": "No answers provided."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        valid_question_ids = set(
-            attempt.quiz.questions.values_list("id", flat=True)
-        )
-
-        with transaction.atomic():
-            # Delete any pre-existing answers (allow resubmit within session)
-            StudentAnswer.objects.filter(attempt=attempt).delete()
-
-            for item in answers_data:
-                question_id = item.get("question")
-                if question_id not in valid_question_ids:
-                    raise ValidationError(
-                        f"Question {question_id} does not belong to this quiz."
-                    )
-
-                answer = StudentAnswer.objects.create(
-                    attempt          = attempt,
-                    question_id      = question_id,
-                    selected_choice_id = item.get("selected_choice"),
-                    text_answer      = item.get("text_answer", ""),
-                )
-                # Many-to-many for multi-select
-                multi = item.get("selected_choices", [])
-                if multi:
-                    answer.selected_choices.set(multi)
-
-            self._auto_grade(attempt)
-
-        invalidate_attempt_caches(attempt)
-        invalidate_offering_cache(attempt.quiz.course_offering_id)
-
-        return Response(
-            QuizAttemptSerializer(attempt).data,
-            status=status.HTTP_200_OK,
-        )
-
-    @action(detail=False, methods=["get"])
-    def my_attempts(self, request):
-        """
-        List the authenticated student's own attempts, optionally filtered
-        to a single quiz.
-
-        Query params
-        ------------
-        quiz : int  – Quiz ID to filter by (optional)
-        """
-        check_user_role(request.user, "student")
-        student  = request.user.student
-        quiz_id  = request.query_params.get("quiz")
-
-        cache_key = CacheKeys.my_attempts(student.id, quiz_id or "all")
-        data      = cache.get(cache_key)
-
-        if data is None:
-            qs = QuizAttempt.objects.filter(
-                student=student
-            ).select_related("quiz").order_by("-started_at")
-            if quiz_id:
-                qs = qs.filter(quiz_id=quiz_id)
-
-            data = {
-                "student":        student.student_number,
-                "total_attempts": qs.count(),
-                "attempts":       QuizAttemptSerializer(qs, many=True).data,
-            }
-            cache.set(cache_key, data, CACHE_TTL["my_attempts"])
-
-        return Response(data)
-
-    @action(detail=True, methods=["get"])
-    def result(self, request, pk=None):
-        """
-        Retrieve the graded result for a completed attempt.
-
-        Students may only view their own results.
-        Response is cached with a longer TTL since results are stable.
-        """
-        attempt = self.get_object()
-
-        # Students restricted to their own results
-        if hasattr(request.user, "student") and attempt.student != request.user.student:
-            raise PermissionDenied("You can only view your own results.")
-
-        if attempt.status not in (
-            QuizAttempt.StatusChoices.SUBMITTED,
-            QuizAttempt.StatusChoices.GRADED,
-        ):
-            return Response(
-                {"error": "This attempt has not been submitted yet."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        cache_key = CacheKeys.attempt_result(attempt.id)
-        data      = cache.get(cache_key)
-
-        if data is None:
-            serialized = QuizAttemptSerializer(attempt).data
-            data = {
-                **serialized,
-                "quiz_title":    attempt.quiz.title,
-                "total_marks":   attempt.quiz.total_marks,
-                "passed":        attempt.percentage >= 50,
-            }
-            cache.set(cache_key, data, CACHE_TTL["attempt_result"])
-
         return Response(data)
 
     @action(detail=True, methods=["post"])
     def grade(self, request, pk=None):
         """
-        Manually set or override marks on individual answers.
+        Manually override marks on short-answer questions. Teacher/admin only.
 
-        Used by teachers to grade short-answer questions that auto-grading
-        could not fully evaluate.
-
-        Expected request body::
-
-            {
-              "answer_grades": [
-                { "answer_id": 12, "marks_awarded": 3 },
-                { "answer_id": 17, "marks_awarded": 0 }
-              ]
-            }
-
-        After grading, the attempt's total marks and percentage are
-        recalculated and the attempt is marked GRADED.
-        Teacher / Admin only.
+        Body: { "attempt_id": 5, "answer_grades": [{ "answer_id": 12, "marks_awarded": 2 }] }
         """
-        attempt = self.get_object()
+        quiz       = self.get_object()
+        attempt_id = request.data.get("attempt_id")
+        if not attempt_id:
+            return Response({"error": "attempt_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            attempt = QuizAttempt.objects.get(id=attempt_id, quiz=quiz)
+        except QuizAttempt.DoesNotExist:
+            return Response({"error": "Attempt not found for this quiz."}, status=status.HTTP_404_NOT_FOUND)
 
         if attempt.status == QuizAttempt.StatusChoices.IN_PROGRESS:
-            return Response(
-                {"error": "Cannot grade an attempt that has not been submitted."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return Response({"error": "Cannot grade an attempt that has not been submitted."}, status=status.HTTP_400_BAD_REQUEST)
 
         answer_grades = request.data.get("answer_grades", [])
         if not answer_grades:
-            return Response(
-                {"error": "answer_grades is required."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return Response({"error": "answer_grades is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         attempt_answer_ids = set(
-            StudentAnswer.objects.filter(attempt=attempt).values_list("id", flat=True)
+            attempt.answers.values_list("id", flat=True)
         )
 
         with transaction.atomic():
             for item in answer_grades:
-                answer_id    = item.get("answer_id")
+                answer_id     = item.get("answer_id")
                 marks_awarded = item.get("marks_awarded")
-
                 if answer_id not in attempt_answer_ids:
-                    raise ValidationError(
-                        f"Answer {answer_id} does not belong to this attempt."
-                    )
+                    raise ValidationError(f"Answer {answer_id} does not belong to this attempt.")
                 if marks_awarded is None or marks_awarded < 0:
-                    raise ValidationError(
-                        f"marks_awarded for answer {answer_id} must be a non-negative number."
-                    )
-
+                    raise ValidationError(f"marks_awarded for answer {answer_id} must be non-negative.")
+                from .models import StudentAnswer
                 answer = StudentAnswer.objects.get(id=answer_id)
-
                 if marks_awarded > answer.question.marks:
-                    raise ValidationError(
-                        f"marks_awarded ({marks_awarded}) exceeds the question's "
-                        f"max marks ({answer.question.marks})."
-                    )
-
+                    raise ValidationError(f"marks_awarded ({marks_awarded}) exceeds max marks ({answer.question.marks}).")
                 answer.marks_awarded = marks_awarded
                 answer.is_correct    = marks_awarded > 0
                 answer.save(update_fields=["marks_awarded", "is_correct"])
+            attempt.calculate_marks()
 
-            # Recalculate attempt totals
-            all_answers    = StudentAnswer.objects.filter(attempt=attempt)
-            marks_obtained = sum(a.marks_awarded for a in all_answers)
-            total_marks    = attempt.quiz.total_marks or 1   # prevent ZeroDivisionError
+        invalidate_attempt_caches(attempt)
+        invalidate_quiz_caches(quiz)
+        attempt.refresh_from_db()
+        return Response(QuizAttemptSerializer(attempt).data, status=status.HTTP_200_OK)
 
-            attempt.marks_obtained = marks_obtained
-            attempt.percentage     = round(marks_obtained / total_marks * 100, 2)
-            attempt.status         = QuizAttempt.StatusChoices.GRADED
-            attempt.save(update_fields=["marks_obtained", "percentage", "status"])
+    # ── Student actions ───────────────────────────────────────────────────────
 
+    @action(detail=True, methods=["post"])
+    def start(self, request, pk=None):
+        """
+        Open a new attempt. Returns attempt_id to pass to /submit/.
+        Enforces published status, optional time window, enrollment, max_attempts.
+        """
+        quiz    = self.get_object()
+        student = request.user.student
+
+        if quiz.status != Quiz.StatusChoices.PUBLISHED:
+            return Response({"error": "This quiz is not currently available."}, status=status.HTTP_400_BAD_REQUEST)
+
+        now = timezone.now()
+        if quiz.start_time and now < quiz.start_time:
+            return Response({"error": "This quiz has not started yet.", "starts_at": quiz.start_time}, status=status.HTTP_400_BAD_REQUEST)
+        if quiz.end_time and now > quiz.end_time:
+            return Response({"error": "This quiz has already ended.", "ended_at": quiz.end_time}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not Enrollment.objects.filter(student=student, course_offering=quiz.course_offering, is_active=True).exists():
+            return Response({"error": "You are not enrolled in the course for this quiz."}, status=status.HTTP_403_FORBIDDEN)
+
+        last = QuizAttempt.objects.filter(quiz=quiz, student=student).aggregate(
+            max_num=Max('attempt_number')
+        )
+        attempt_number = (last['max_num'] or 0) + 1
+
+        attempt_count = QuizAttempt.objects.filter(quiz=quiz, student=student).count()
+        if quiz.max_attempts and attempt_count >= quiz.max_attempts:
+            return Response(...)
+
+        attempt = QuizAttempt.objects.create(
+            quiz           = quiz,
+            student        = student,
+            attempt_number = attempt_number,  
+            status         = QuizAttempt.StatusChoices.IN_PROGRESS,
+            started_at     = now,
+        )
         invalidate_attempt_caches(attempt)
 
         return Response(
-            QuizAttemptSerializer(attempt).data,
+            {
+                "attempt_id":         attempt.id,
+                "attempt_number":     attempt.attempt_number,
+                "attempts_remaining": (quiz.max_attempts - attempt.attempt_number) if quiz.max_attempts else None,
+                "quiz_id":            quiz.id,
+                "title":              quiz.title,
+                "duration_minutes":   quiz.duration_minutes,
+                "started_at":         attempt.started_at,
+                "questions":          self._questions_data_for_student(quiz),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=["post"])
+    def submit(self, request, pk=None):
+        """
+        Submit answers for an in-progress attempt and get back the score.
+
+        Body:
+            {
+              "attempt_id": 5,
+              "answers": [
+                { "question": 1, "selected_choice": 3 },
+                { "question": 2, "selected_choices": [3, 5] },
+                { "question": 3, "text_answer": "marginal utility" }
+              ]
+            }
+        """
+        quiz       = self.get_object()
+        student    = request.user.student
+        attempt_id = request.data.get("attempt_id")
+
+        if not attempt_id:
+            return Response({"error": "attempt_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            attempt = QuizAttempt.objects.get(id=attempt_id, quiz=quiz)
+        except QuizAttempt.DoesNotExist:
+            return Response({"error": "Attempt not found for this quiz."}, status=status.HTTP_404_NOT_FOUND)
+
+        if attempt.student != student:
+            raise PermissionDenied("This attempt does not belong to you.")
+
+        if attempt.status != QuizAttempt.StatusChoices.IN_PROGRESS:
+            return Response({"error": "This attempt has already been submitted."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if quiz.duration_minutes:
+            elapsed = (timezone.now() - attempt.started_at).total_seconds() / 60
+            if elapsed > quiz.duration_minutes + 1:
+                return Response({"error": "Time limit exceeded. Your attempt has expired."}, status=status.HTTP_400_BAD_REQUEST)
+
+        answers_data = request.data.get("answers", [])
+        if not answers_data:
+            return Response({"error": "No answers provided."}, status=status.HTTP_400_BAD_REQUEST)
+
+        valid_question_ids = set(quiz.questions.values_list("id", flat=True))
+
+        with transaction.atomic():
+            from .models import StudentAnswer
+            StudentAnswer.objects.filter(attempt=attempt).delete()
+
+            for item in answers_data:
+                question_id = item.get("question")
+                if question_id not in valid_question_ids:
+                    raise ValidationError(f"Question {question_id} does not belong to this quiz.")
+                try:
+                    answer = StudentAnswer.objects.create(
+                        attempt            = attempt,
+                        question_id        = question_id,
+                        selected_choice_id = item.get("selected_choice") or None,
+                        text_answer        = item.get("text_answer") or None,
+                    )
+                except DjangoValidationError as e:
+                    raise ValidationError(e.message_dict if hasattr(e, "message_dict") else e.messages)
+
+                multi = item.get("selected_choices", [])
+                if multi:
+                    answer.selected_choices.set(multi)
+
+            attempt.auto_grade_all()
+            correct_count = attempt.answers.filter(is_correct=True).count()
+
+        invalidate_attempt_caches(attempt)
+        invalidate_offering_cache(quiz.course_offering_id)
+        invalidate_quiz_caches(quiz)
+        attempt.refresh_from_db()
+
+        return Response(
+            {
+                **QuizAttemptSerializer(attempt).data,
+                "quiz_title":  quiz.title,
+                "total_marks": quiz.total_marks,
+                "correct_count": correct_count,
+                "passed":      (attempt.percentage or 0) >= 50,
+                "total_questions": quiz.questions.count(),
+            },
             status=status.HTTP_200_OK,
         )
+
+    @action(detail=True, methods=["get"])
+    def result(self, request, pk=None):
+        """Best submitted result for the authenticated student on this quiz."""
+        quiz    = self.get_object()
+        student = request.user.student
+
+        attempt = QuizAttempt.objects.filter(
+            quiz=quiz, student=student,
+            status__in=[QuizAttempt.StatusChoices.SUBMITTED, QuizAttempt.StatusChoices.GRADED],
+        ).order_by("-marks_obtained").first()
+
+        if not attempt:
+            return Response({"error": "No submitted attempt found for this quiz."}, status=status.HTTP_404_NOT_FOUND)
+
+        cache_key = CacheKeys.attempt_result(attempt.id)
+        data      = cache.get(cache_key)
+        if data is None:
+            data = {
+                **QuizAttemptSerializer(attempt).data,
+                "quiz_title":  quiz.title,
+                "total_marks": quiz.total_marks,
+                "passed":      (attempt.percentage or 0) >= 50,
+            }
+            cache.set(cache_key, data, CACHE_TTL["attempt_result"])
+        return Response(data)
