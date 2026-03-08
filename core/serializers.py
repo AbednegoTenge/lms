@@ -323,3 +323,34 @@ class QuizAttemptSerializer(serializers.ModelSerializer):
 class TokenRefreshResponseSerializer(serializers.Serializer):
     access = serializers.CharField()
     refresh = serializers.CharField()
+
+
+class GradebookEntrySerializer(serializers.Serializer):
+    id             = serializers.IntegerField()
+    category       = serializers.CharField()
+    title          = serializers.CharField()
+    total_marks    = serializers.FloatField()
+    marks_obtained = serializers.FloatField(allow_null=True)
+    percentage     = serializers.FloatField(allow_null=True)
+    status         = serializers.CharField()
+
+
+class GradebookWeightsSerializer(serializers.Serializer):
+    assignments = serializers.IntegerField()
+    quizzes     = serializers.IntegerField()
+    total       = serializers.IntegerField()
+
+
+class GradebookSummarySerializer(serializers.Serializer):
+    assignment_score = serializers.FloatField(allow_null=True)
+    quiz_score       = serializers.FloatField(allow_null=True)
+    overall_score    = serializers.FloatField(allow_null=True)
+    letter_grade     = serializers.CharField()
+
+
+class GradebookSerializer(serializers.Serializer):
+    course_code = serializers.CharField()
+    course_name = serializers.CharField()
+    weights     = GradebookWeightsSerializer()
+    summary     = GradebookSummarySerializer()
+    entries     = GradebookEntrySerializer(many=True)
