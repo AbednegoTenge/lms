@@ -6,7 +6,7 @@ from .models import (
     Programme, Course, CourseOffering, AcademicTerm, 
     Enrollment, Submission, Assignment, Quiz, Question, 
     Choice, ShortAnswerKey, QuizAttempt, StudentAnswer,
-    CourseOutline, CourseResource
+    CourseOutline, CourseResource, GradeWeight
 )
 from django import forms
 from django.db.models import Q
@@ -512,6 +512,11 @@ class StudentAnswerAdmin(admin.ModelAdmin):
         if choices.exists():
             return ', '.join(c.text for c in choices)
         return '-'
+
+@admin.register(GradeWeight)
+class GradeWeightAdmin(admin.ModelAdmin):
+    list_display  = ['course_offering', 'assignments_weight', 'quizzes_weight']
+    list_editable = ['assignments_weight', 'quizzes_weight']
 
 admin.site.register(Admin)
 admin.site.register(Principal)
