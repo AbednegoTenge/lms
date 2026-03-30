@@ -6,7 +6,11 @@ from django.contrib.auth import get_user_model
 def test_student_creation():
     User = get_user_model()
     user = User.objects.create_user(username='student1', password='testpass')
-    student = Student.objects.create(user=user, date_of_birth='2000-01-01')
+    student = Student.objects.create(
+        user=user,
+        date_of_birth='2000-01-01',
+        gender=Student.GenderChoices.MALE,
+    )
     
     assert student.student_number.startswith('STD')
     assert student.user.school_id == student.student_number

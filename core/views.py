@@ -7,22 +7,24 @@ from rest_framework import status
 from django.contrib.auth import authenticate
 from django.core.cache import cache
 from django.db import transaction
-from django.db.models import Q
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.utils import timezone
 from .models import (
-    User, Student, Teacher, Principal,
+    User, Student, Teacher, Principal, Admin,
     Programme, Course, CourseOffering, AcademicTerm,
     Enrollment, Assignment, Submission, Quiz,
-    QuizAttempt, CourseOutline, CourseResource, GradeWeight
+    QuizAttempt, CourseOutline, CourseResource, GradeWeight,
+    Question, Choice, ShortAnswerKey
 )
 from .serializers import (
     UserSerializer, StudentSerializer, TeacherSerializer,
-    PrincipalSerializer, ProgrammeSerializer, CourseSerializer,
-    CourseOfferingSerializer,EnrollmentSerializer,
+    PrincipalSerializer, AdminSerializer, ProgrammeSerializer, CourseSerializer,
+    CourseOfferingSerializer, EnrollmentSerializer,
     AssignmentSerializer, SubmissionSerializer, QuizSerializer,
-    QuestionSerializer, GradebookSerializer,
-    QuizAttemptSerializer, CourseResourceSerializer, CourseOutlineSerializer
+    QuestionSerializer, ChoiceSerializer, ShortAnswerKeySerializer,
+    GradebookSerializer, QuizAttemptSerializer,
+    CourseResourceSerializer, CourseOutlineSerializer,
+    AcademicTermSerializer, GradeWeightSerializer
 )
 from .permissions import (
     IsTeacher, IsStudent, IsAdmin, IsTeacherOrAdmin, IsTeacherOfCourse, IsOwnerOrAdmin
@@ -39,7 +41,8 @@ from .cache import (
     invalidate_enrollment_caches,
     invalidate_submission_caches,
     invalidate_attempt_caches,
-    invalidate_quiz_caches
+    invalidate_quiz_caches,
+    invalidate_current_term_cache
 )
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Max
@@ -85,6 +88,24 @@ def get_enrolled_course_offerings(student, term=None):
         course_offering__term=term.term_number,
         is_active=True,
     ).values_list("course_offering_id", flat=True)
+
+
+def require_teacher_assigned_to_offering(user, offering, message=None) -> None:
+    """Raise 403 if a teacher is not assigned to the given offering."""
+    if user.is_staff or user.is_superuser:
+        return
+    if not hasattr(user, "teacher"):
+        raise PermissionDenied(message or "Only teachers and admins can perform this action.")
+    if not user.teacher.assigned_course.filter(id=offering.id).exists():
+        raise PermissionDenied(message or "You are not assigned to this course offering.")
+
+
+def require_teacher_owns_quiz(user, quiz, message=None) -> None:
+    """Raise 403 if a teacher does not own the given quiz."""
+    if user.is_staff or user.is_superuser:
+        return
+    if not hasattr(user, "teacher") or quiz.teacher != user.teacher:
+        raise PermissionDenied(message or "You do not own this quiz.")
 
 class UserViewSet(ModelViewSet):
     queryset = User.objects.all()
@@ -495,6 +516,8 @@ class PrincipalViewSet(ProfileViewSetMixin, ModelViewSet):
     def get_permissions(self):
         if self.action in ["create", "update", "partial_update", "destroy"]:
             return [IsAuthenticated(), IsAdmin()]
+        if self.action == "gradebook":
+            return [IsAuthenticated(), IsStudent()]
         return [IsAuthenticated()]
 
     def get_queryset(self):
@@ -531,6 +554,59 @@ class PrincipalViewSet(ProfileViewSetMixin, ModelViewSet):
             cache.set(cache_key, data, CACHE_TTL["principal_dashboard"])
 
         return Response(data)
+
+
+class AdminViewSet(ProfileViewSetMixin, ModelViewSet):
+    queryset           = Admin.objects.select_related("user").all()
+    serializer_class   = AdminSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        if self.action in ["create", "update", "partial_update", "destroy"]:
+            return [IsAuthenticated(), IsAdmin()]
+        if self.action == "me":
+            return [IsAuthenticated(), IsAdmin()]
+        return [IsAuthenticated()]
+
+    def get_queryset(self):
+        return self.get_queryset_for_profile(Admin, "admin", ["user"])
+
+    @action(detail=False, methods=["get"])
+    def me(self, request):
+        return self.get_me_action("admin", "User is not an admin")
+
+
+class AcademicTermViewSet(ModelViewSet):
+    queryset           = AcademicTerm.objects.all()
+    serializer_class   = AcademicTermSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        if self.action in ["create", "update", "partial_update", "destroy"]:
+            return [IsAuthenticated(), IsAdmin()]
+        return [IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        serializer.save()
+        invalidate_current_term_cache()
+
+    def perform_update(self, serializer):
+        serializer.save()
+        invalidate_current_term_cache()
+
+    def perform_destroy(self, instance):
+        instance.delete()
+        invalidate_current_term_cache()
+
+    @action(detail=False, methods=["get"])
+    def current(self, request):
+        term = get_current_term()
+        if not term:
+            return Response(
+                {"error": "No current academic term set"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(self.get_serializer(term).data)
 
 class ProgrammeViewSet(ModelViewSet):
     queryset           = Programme.objects.all()
@@ -740,7 +816,7 @@ class CourseOfferingViewSet(ModelViewSet):
                 queryset = queryset.filter(
                     term=current_term.term_number, is_active=True
                 )
-        elif hasattr(user, "teacher") and not filters:
+        elif hasattr(user, "teacher"):
             queryset = queryset.filter(
                 id__in=user.teacher.assigned_course.values_list("id", flat=True)
             )
@@ -837,11 +913,10 @@ class CourseOfferingViewSet(ModelViewSet):
     @action(detail=True, methods=["get"])
     def outline(self, request, pk=None):
         offering = self.get_object()
-        cache_key = f"offering_{offering.id}_outline"
+        cache_key = CacheKeys.offering_outline(offering.id)
         data = cache.get(cache_key)
 
         if data is None:
-            print('not from cache')
             qs = CourseOutline.objects.filter(course_offering=offering).order_by("week")
             data = {
                 "course_code": offering.course_code,
@@ -851,7 +926,6 @@ class CourseOfferingViewSet(ModelViewSet):
                 "weeks": CourseOutlineSerializer(qs, many=True).data,
             }
             cache.set(cache_key, data, CACHE_TTL.get("offering_weeks", 300))
-            print('set to cache')
 
         return Response(data)
 
@@ -859,7 +933,7 @@ class CourseOfferingViewSet(ModelViewSet):
     @action(detail=True, methods=["get"])
     def resources(self, request, pk=None):
         offering  = self.get_object()
-        cache_key = f"offering_{offering.id}_resources"
+        cache_key = CacheKeys.offering_resources(offering.id)
         data      = cache.get(cache_key)
 
         if data is None:
@@ -878,7 +952,7 @@ class CourseOfferingViewSet(ModelViewSet):
     @action(detail=True, methods=["get"])
     def stats(self, request, pk=None):
         offering = self.get_object()
-        cache_key = f"offering_{offering.id}_stats"
+        cache_key = CacheKeys.offering_stats(offering.id)
         data      = cache.get(cache_key)
 
         if data is None:
@@ -913,6 +987,7 @@ class CourseOfferingViewSet(ModelViewSet):
     @action(detail=True, methods=["get"])
     def gradebook(self, request, pk=None):
         offering = self.get_object()
+        check_user_role(request.user, "student")
         student  = request.user.student
 
         # ── Weights ───────────────────────────────────────────────────
@@ -1033,6 +1108,254 @@ class CourseOfferingViewSet(ModelViewSet):
         if score >= 50: return 'D'
         if score >= 45: return 'E'
         return 'F'
+
+
+class CourseOutlineViewSet(ModelViewSet):
+    queryset = CourseOutline.objects.select_related("course_offering__course").all()
+    serializer_class = CourseOutlineSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        if self.action in ["create", "update", "partial_update", "destroy"]:
+            return [IsAuthenticated(), IsTeacherOrAdmin()]
+        return [IsAuthenticated()]
+
+    def get_queryset(self):
+        user = self.request.user
+        queryset = CourseOutline.objects.select_related("course_offering__course")
+        if user.is_staff or user.is_superuser:
+            return queryset.all()
+        if hasattr(user, "teacher"):
+            return queryset.filter(course_offering__in=user.teacher.assigned_course.all())
+        if hasattr(user, "student"):
+            current_term = get_current_term()
+            if not current_term:
+                return queryset.none()
+            enrolled = get_enrolled_course_offerings(user.student, current_term)
+            return queryset.filter(course_offering_id__in=enrolled)
+        return queryset.none()
+
+    def perform_create(self, serializer):
+        offering = serializer.validated_data["course_offering"]
+        require_teacher_assigned_to_offering(self.request.user, offering)
+        outline = serializer.save()
+        invalidate_offering_cache(outline.course_offering_id)
+
+    def perform_update(self, serializer):
+        offering = serializer.validated_data.get("course_offering") or serializer.instance.course_offering
+        require_teacher_assigned_to_offering(self.request.user, offering)
+        outline = serializer.save()
+        invalidate_offering_cache(outline.course_offering_id)
+
+    def perform_destroy(self, instance):
+        offering_id = instance.course_offering_id
+        instance.delete()
+        invalidate_offering_cache(offering_id)
+
+
+class CourseResourceViewSet(ModelViewSet):
+    queryset = CourseResource.objects.select_related("course_offering__course").all()
+    serializer_class = CourseResourceSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        if self.action in ["create", "update", "partial_update", "destroy"]:
+            return [IsAuthenticated(), IsTeacherOrAdmin()]
+        return [IsAuthenticated()]
+
+    def get_queryset(self):
+        user = self.request.user
+        queryset = CourseResource.objects.select_related("course_offering__course")
+        if user.is_staff or user.is_superuser:
+            return queryset.all()
+        if hasattr(user, "teacher"):
+            return queryset.filter(course_offering__in=user.teacher.assigned_course.all())
+        if hasattr(user, "student"):
+            current_term = get_current_term()
+            if not current_term:
+                return queryset.none()
+            enrolled = get_enrolled_course_offerings(user.student, current_term)
+            return queryset.filter(course_offering_id__in=enrolled)
+        return queryset.none()
+
+    def perform_create(self, serializer):
+        offering = serializer.validated_data["course_offering"]
+        require_teacher_assigned_to_offering(self.request.user, offering)
+        resource = serializer.save()
+        invalidate_offering_cache(resource.course_offering_id)
+
+    def perform_update(self, serializer):
+        offering = serializer.validated_data.get("course_offering") or serializer.instance.course_offering
+        require_teacher_assigned_to_offering(self.request.user, offering)
+        resource = serializer.save()
+        invalidate_offering_cache(resource.course_offering_id)
+
+    def perform_destroy(self, instance):
+        offering_id = instance.course_offering_id
+        instance.delete()
+        invalidate_offering_cache(offering_id)
+
+
+class GradeWeightViewSet(ModelViewSet):
+    queryset = GradeWeight.objects.select_related("course_offering__course").all()
+    serializer_class = GradeWeightSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        if self.action in ["create", "update", "partial_update", "destroy"]:
+            return [IsAuthenticated(), IsTeacherOrAdmin()]
+        return [IsAuthenticated()]
+
+    def get_queryset(self):
+        user = self.request.user
+        queryset = GradeWeight.objects.select_related("course_offering__course")
+        if user.is_staff or user.is_superuser:
+            return queryset.all()
+        if hasattr(user, "teacher"):
+            return queryset.filter(course_offering__in=user.teacher.assigned_course.all())
+        return queryset.none()
+
+    def perform_create(self, serializer):
+        offering = serializer.validated_data["course_offering"]
+        require_teacher_assigned_to_offering(self.request.user, offering)
+        if GradeWeight.objects.filter(course_offering=offering).exists():
+            raise ValidationError("Grade weights already exist for this course offering.")
+        weights = serializer.save()
+        invalidate_offering_cache(weights.course_offering_id)
+
+    def perform_update(self, serializer):
+        offering = serializer.validated_data.get("course_offering") or serializer.instance.course_offering
+        require_teacher_assigned_to_offering(self.request.user, offering)
+        weights = serializer.save()
+        invalidate_offering_cache(weights.course_offering_id)
+
+    def perform_destroy(self, instance):
+        offering_id = instance.course_offering_id
+        instance.delete()
+        invalidate_offering_cache(offering_id)
+
+
+class QuestionViewSet(ModelViewSet):
+    queryset = Question.objects.select_related("quiz__course_offering__course", "quiz__teacher__user").all()
+    serializer_class = QuestionSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        return [IsAuthenticated(), IsTeacherOrAdmin()]
+
+    def get_queryset(self):
+        user = self.request.user
+        queryset = Question.objects.select_related("quiz__course_offering__course", "quiz__teacher__user")
+        if user.is_staff or user.is_superuser:
+            return queryset.all()
+        if hasattr(user, "teacher"):
+            return queryset.filter(quiz__teacher=user.teacher)
+        return queryset.none()
+
+    def perform_create(self, serializer):
+        quiz = serializer.validated_data["quiz"]
+        require_teacher_owns_quiz(self.request.user, quiz)
+        try:
+            question = serializer.save()
+        except DjangoValidationError as e:
+            raise ValidationError(e.message_dict if hasattr(e, "message_dict") else e.messages)
+        invalidate_quiz_caches(question.quiz)
+
+    def perform_update(self, serializer):
+        quiz = serializer.instance.quiz
+        require_teacher_owns_quiz(self.request.user, quiz)
+        try:
+            question = serializer.save()
+        except DjangoValidationError as e:
+            raise ValidationError(e.message_dict if hasattr(e, "message_dict") else e.messages)
+        invalidate_quiz_caches(question.quiz)
+
+    def perform_destroy(self, instance):
+        quiz = instance.quiz
+        instance.delete()
+        invalidate_quiz_caches(quiz)
+
+
+class ChoiceViewSet(ModelViewSet):
+    queryset = Choice.objects.select_related("question__quiz__course_offering__course", "question__quiz__teacher__user").all()
+    serializer_class = ChoiceSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        return [IsAuthenticated(), IsTeacherOrAdmin()]
+
+    def get_queryset(self):
+        user = self.request.user
+        queryset = Choice.objects.select_related("question__quiz__course_offering__course", "question__quiz__teacher__user")
+        if user.is_staff or user.is_superuser:
+            return queryset.all()
+        if hasattr(user, "teacher"):
+            return queryset.filter(question__quiz__teacher=user.teacher)
+        return queryset.none()
+
+    def perform_create(self, serializer):
+        question = serializer.validated_data["question"]
+        require_teacher_owns_quiz(self.request.user, question.quiz)
+        try:
+            choice = serializer.save()
+        except DjangoValidationError as e:
+            raise ValidationError(e.message_dict if hasattr(e, "message_dict") else e.messages)
+        invalidate_quiz_caches(choice.question.quiz)
+
+    def perform_update(self, serializer):
+        quiz = serializer.instance.question.quiz
+        require_teacher_owns_quiz(self.request.user, quiz)
+        try:
+            choice = serializer.save()
+        except DjangoValidationError as e:
+            raise ValidationError(e.message_dict if hasattr(e, "message_dict") else e.messages)
+        invalidate_quiz_caches(choice.question.quiz)
+
+    def perform_destroy(self, instance):
+        quiz = instance.question.quiz
+        instance.delete()
+        invalidate_quiz_caches(quiz)
+
+
+class ShortAnswerKeyViewSet(ModelViewSet):
+    queryset = ShortAnswerKey.objects.select_related("question__quiz__course_offering__course", "question__quiz__teacher__user").all()
+    serializer_class = ShortAnswerKeySerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        return [IsAuthenticated(), IsTeacherOrAdmin()]
+
+    def get_queryset(self):
+        user = self.request.user
+        queryset = ShortAnswerKey.objects.select_related("question__quiz__course_offering__course", "question__quiz__teacher__user")
+        if user.is_staff or user.is_superuser:
+            return queryset.all()
+        if hasattr(user, "teacher"):
+            return queryset.filter(question__quiz__teacher=user.teacher)
+        return queryset.none()
+
+    def perform_create(self, serializer):
+        question = serializer.validated_data["question"]
+        require_teacher_owns_quiz(self.request.user, question.quiz)
+        try:
+            key = serializer.save()
+        except DjangoValidationError as e:
+            raise ValidationError(e.message_dict if hasattr(e, "message_dict") else e.messages)
+        invalidate_quiz_caches(key.question.quiz)
+
+    def perform_update(self, serializer):
+        quiz = serializer.instance.question.quiz
+        require_teacher_owns_quiz(self.request.user, quiz)
+        try:
+            key = serializer.save()
+        except DjangoValidationError as e:
+            raise ValidationError(e.message_dict if hasattr(e, "message_dict") else e.messages)
+        invalidate_quiz_caches(key.question.quiz)
+
+    def perform_destroy(self, instance):
+        quiz = instance.question.quiz
+        instance.delete()
+        invalidate_quiz_caches(quiz)
     
 class EnrollmentViewSet(ModelViewSet):
     queryset = Enrollment.objects.select_related(
@@ -1045,6 +1368,8 @@ class EnrollmentViewSet(ModelViewSet):
             return [IsAuthenticated(), IsAdmin()]
         if self.action in ["update", "partial_update", "update_grade"]:
             return [IsAuthenticated(), IsTeacherOrAdmin()]
+        if self.action in ["my_enrollments", "select_electives"]:
+            return [IsAuthenticated(), IsStudent()]
         return [IsAuthenticated()]
 
     def get_queryset(self):
@@ -1084,10 +1409,34 @@ class EnrollmentViewSet(ModelViewSet):
                     return
                 raise PermissionDenied("You are not teaching this course.")
             raise PermissionDenied("You don't have permission to modify enrollments.")
+    
+    def _assign_teaching_slot(self, enrollment):
+        from core.models import CourseOfferingTeacher
+        """Auto-assign teaching_slot based on student's section (core) or sole slot (elective)."""
+        student  = enrollment.student
+        offering = enrollment.course_offering
 
+        if enrollment.is_core:
+            if not student.section:
+                return  # no section assigned yet, leave NULL
+            slot = CourseOfferingTeacher.objects.filter(
+                course_offering=offering,
+                section=student.section,
+            ).first()
+        else:
+            # elective — single teacher, section=None
+            slot = CourseOfferingTeacher.objects.filter(
+                course_offering=offering,
+                section=None,
+            ).first()
+
+        if slot:
+            enrollment.teaching_slot = slot
+            enrollment.save(update_fields=['teaching_slot'])
 
     def perform_create(self, serializer):
         enrollment = serializer.save()
+        self._assign_teaching_slot(enrollment)
         invalidate_enrollment_caches(enrollment)
 
     def perform_destroy(self, instance):
@@ -1113,8 +1462,10 @@ class EnrollmentViewSet(ModelViewSet):
                 student=student,
                 course_offering__term=current_term.term_number,
                 is_active=True,
-            ).select_related("course_offering__course")
-
+            ).select_related(
+                "course_offering__course",
+                "teaching_slot__teacher__user",
+            )
             serialized = self.get_serializer(qs, many=True).data
             data = {
                 "term":             current_term.term_number,
@@ -1126,6 +1477,101 @@ class EnrollmentViewSet(ModelViewSet):
             cache.set(cache_key, data, CACHE_TTL["my_enrollments"])
 
         return Response(data)
+
+    @action(detail=False, methods=["post"], url_path="select_electives")
+    def select_electives(self, request):
+        check_user_role(request.user, "student")
+        student = request.user.student
+
+        offering_ids = request.data.get("course_offering_ids", [])
+        if not isinstance(offering_ids, list) or not offering_ids:
+            return Response(
+                {"error": "course_offering_ids must be a non-empty list."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Disallow duplicates to avoid confusing results
+        unique_ids = list(dict.fromkeys(offering_ids))
+        if len(unique_ids) != len(offering_ids):
+            return Response(
+                {"error": "Duplicate course_offering_ids are not allowed."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        current_term = get_current_term()
+        if not current_term:
+            return Response(
+                {"error": "No current academic term set"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if not current_term.elective_selection_open:
+            return Response(
+                {"error": "Elective selection is currently closed."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if not student.programme:
+            return Response(
+                {"error": "Student is not assigned to a programme."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        max_electives = student.programme.max_electives_per_term
+        if len(unique_ids) > max_electives:
+            return Response(
+                {"error": f"Maximum electives per term is {max_electives}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        offerings = CourseOffering.objects.filter(
+            id__in=unique_ids,
+            course__course_type="ELECTIVE",
+            course__programmes=student.programme,
+            level=student.level,
+            term=current_term.term_number,
+            is_active=True,
+        ).select_related("course").distinct()
+
+        if offerings.count() != len(unique_ids):
+            valid_ids = set(offerings.values_list("id", flat=True))
+            invalid_ids = [oid for oid in unique_ids if oid not in valid_ids]
+            return Response(
+                {"error": "Some course_offering_ids are invalid for this student/term.", "invalid_ids": invalid_ids},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        existing = Enrollment.objects.filter(
+            student=student,
+            course_offering__term=current_term.term_number,
+            is_core=False,
+        ).select_related("course_offering")
+
+        with transaction.atomic():
+            for enrollment in existing:
+                invalidate_enrollment_caches(enrollment)
+            existing.delete()
+
+            created = []
+            for offering in offerings:
+                enrollment = Enrollment.objects.create(
+                    student=student,
+                    course_offering=offering,
+                    is_core=False,
+                )
+                self._assign_teaching_slot(enrollment)
+                created.append(enrollment)
+                invalidate_enrollment_caches(enrollment)
+        return Response(
+            {
+                "message": "Electives updated successfully.",
+                "term": current_term.term_number,
+                "academic_year": current_term.academic_year,
+                "selected_count": len(created),
+                "electives": EnrollmentSerializer(created, many=True).data,
+            },
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=False, methods=["post"])
     def bulk_enroll(self, request):
@@ -1157,9 +1603,9 @@ class EnrollmentViewSet(ModelViewSet):
                     defaults={"is_core": is_core},
                 )
                 if created:
+                    self._assign_teaching_slot(enrollment)
                     created_enrollments.append(enrollment)
                     invalidate_student_cache(student)
-
             # Invalidate offering-level caches once after the loop
             invalidate_offering_cache(course_offering_id)
 
@@ -1222,7 +1668,7 @@ class AssignmentViewSet(ModelViewSet):
         if self.action == "create":
             return [IsAuthenticated(), IsTeacher()]
         if self.action in ["update", "partial_update", "destroy"]:
-            return [IsAuthenticated(), (IsTeacherOfCourse | IsAdmin)]
+            return [IsAuthenticated(), IsTeacherOfCourse() | IsAdmin()]
         return [IsAuthenticated()]
 
     def get_queryset(self):
@@ -1246,10 +1692,14 @@ class AssignmentViewSet(ModelViewSet):
         return queryset.none()
 
     def perform_create(self, serializer):
+        offering = serializer.validated_data["course_offering"]
+        require_teacher_assigned_to_offering(self.request.user, offering)
         assignment = serializer.save(teacher=self.request.user.teacher)
         invalidate_assignment_caches(assignment)
 
     def perform_update(self, serializer):
+        offering = serializer.validated_data.get("course_offering") or serializer.instance.course_offering
+        require_teacher_assigned_to_offering(self.request.user, offering)
         assignment = serializer.save()
         invalidate_assignment_caches(assignment)
 
@@ -1269,24 +1719,45 @@ class SubmissionViewSet(ModelViewSet):
             return [IsAuthenticated(), IsStudent()]
         if self.action in ["update", "partial_update"]:
             return [IsAuthenticated(), IsOwnerOrAdmin()]
+        if self.action == "grade":
+            return [IsAuthenticated(), IsTeacherOrAdmin()]
         if self.action == "destroy":
             return [IsAuthenticated(), IsAdmin()]
         return [IsAuthenticated()]
 
     def get_queryset(self):
-        user     = self.request.user
+        user = self.request.user
         queryset = Submission.objects.select_related(
             "assignment__course_offering__course", "student__user"
         )
         if user.is_staff or user.is_superuser:
-            return queryset.all()
-        if hasattr(user, "student"):
-            return queryset.filter(student=user.student)
-        if hasattr(user, "teacher"):
-            return queryset.filter(
-                assignment__teacher=user.teacher
-            )
-        return queryset.none()
+            queryset = queryset.all()
+        elif hasattr(user, "student"):
+            queryset = queryset.filter(student=user.student)
+        elif hasattr(user, "teacher"):
+            queryset = queryset.filter(assignment__teacher=user.teacher)
+        else:
+            return queryset.none()
+
+        # Filter by assignment if provided
+        assignment_id = self.request.query_params.get('assignment')
+        if assignment_id:
+            queryset = queryset.filter(assignment_id=assignment_id)
+
+        return queryset
+
+    def check_object_permissions(self, request, obj):
+        super().check_object_permissions(request, obj)
+        if request.method in ("GET", "HEAD", "OPTIONS"):
+            return
+
+        # Students can only update submission content, not grading fields
+        if hasattr(request.user, "student") and obj.student == request.user.student:
+            if obj.assignment.is_past_due:
+                raise PermissionDenied("This assignment is past its due date and is no longer accepting submissions.")
+            forbidden = {"marks_obtained", "feedback", "is_graded", "graded_at", "graded_by", "status"}
+            if forbidden.intersection(set(request.data.keys())):
+                raise PermissionDenied("Students cannot update grading fields.")
 
     def perform_create(self, serializer):
         try:
@@ -1302,6 +1773,45 @@ class SubmissionViewSet(ModelViewSet):
     def perform_destroy(self, instance):
         invalidate_submission_caches(instance)
         instance.delete()
+
+    @action(detail=True, methods=["post"])
+    def grade(self, request, pk=None):
+        submission = self.get_object()
+        user = request.user
+
+        is_admin = user.is_staff or user.is_superuser
+        is_teacher = hasattr(user, "teacher") and submission.assignment.teacher == user.teacher
+        if not (is_admin or is_teacher):
+            raise PermissionDenied("You are not allowed to grade this submission.")
+
+        marks_obtained = request.data.get("marks_obtained")
+        feedback = request.data.get("feedback")
+        status_value = request.data.get("status", Submission.StatusChoices.GRADED)
+
+        if status_value not in [Submission.StatusChoices.GRADED, Submission.StatusChoices.RETURNED]:
+            return Response(
+                {"error": "status must be 'graded' or 'returned'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if status_value == Submission.StatusChoices.GRADED and marks_obtained is None:
+            return Response(
+                {"error": "marks_obtained is required when grading a submission."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        submission.marks_obtained = marks_obtained
+        submission.feedback = feedback
+        submission.status = status_value
+        submission.is_graded = status_value == Submission.StatusChoices.GRADED
+
+        try:
+            submission.save()
+        except DjangoValidationError as e:
+            raise ValidationError(e.message_dict if hasattr(e, "message_dict") else e.messages)
+
+        invalidate_submission_caches(submission)
+        return Response(self.get_serializer(submission).data, status=status.HTTP_200_OK)
 
 
 
@@ -1332,8 +1842,8 @@ class QuizViewSet(ModelViewSet):
         if self.action == "create":
             return [IsAuthenticated(), IsTeacher()]
         if self.action in ["update", "partial_update", "destroy", "publish", "close", "attempts", "grade"]:
-            return [IsAuthenticated(), IsTeacherOfCourse | IsAdmin]
-        if self.action in ["start", "submit", "result"]:
+            return [IsAuthenticated(), IsTeacherOfCourse() | IsAdmin()]
+        if self.action in ["start", "submit", "result", "review"]:
             return [IsAuthenticated(), IsStudent()]
         return [IsAuthenticated()]
 
@@ -1384,15 +1894,30 @@ class QuizViewSet(ModelViewSet):
     def list(self, request, *args, **kwargs):
         response = super().list(request, *args, **kwargs)
         if hasattr(request.user, "student"):
+            student = request.user.student
             response.data = [self._strip_answers(q) for q in response.data]
+
+            # Annotate each quiz with attempts remaining for this student
+            for quiz in response.data:
+                used = QuizAttempt.objects.filter(
+                    quiz_id=quiz['id'], student=student
+                ).count()
+                max_att = quiz.get('max_attempts')
+                quiz['attempts_used']      = used
+                quiz['attempts_remaining'] = (max_att - used) if max_att else None
+
         return response
 
     # ── Write hooks ───────────────────────────────────────────────────────────
 
     def perform_create(self, serializer):
+        offering = serializer.validated_data["course_offering"]
+        require_teacher_assigned_to_offering(self.request.user, offering)
         invalidate_quiz_caches(serializer.save(teacher=self.request.user.teacher))
 
     def perform_update(self, serializer):
+        offering = serializer.validated_data.get("course_offering") or serializer.instance.course_offering
+        require_teacher_assigned_to_offering(self.request.user, offering)
         invalidate_quiz_caches(serializer.save())
 
     def perform_destroy(self, instance):
@@ -1565,27 +2090,30 @@ class QuizViewSet(ModelViewSet):
 
         attempt_count = QuizAttempt.objects.filter(quiz=quiz, student=student).count()
         if quiz.max_attempts and attempt_count >= quiz.max_attempts:
-            return Response(...)
+            return Response(
+                {"error": f"You have reached the maximum of {quiz.max_attempts} attempt(s) for this quiz."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         attempt = QuizAttempt.objects.create(
-            quiz           = quiz,
-            student        = student,
+            quiz = quiz,
+            student = student,
             attempt_number = attempt_number,  
-            status         = QuizAttempt.StatusChoices.IN_PROGRESS,
-            started_at     = now,
+            status = QuizAttempt.StatusChoices.IN_PROGRESS,
+            started_at = now,
         )
         invalidate_attempt_caches(attempt)
 
         return Response(
             {
-                "attempt_id":         attempt.id,
-                "attempt_number":     attempt.attempt_number,
+                "attempt_id": attempt.id,
+                "attempt_number": attempt.attempt_number,
                 "attempts_remaining": (quiz.max_attempts - attempt.attempt_number) if quiz.max_attempts else None,
-                "quiz_id":            quiz.id,
-                "title":              quiz.title,
-                "duration_minutes":   quiz.duration_minutes,
-                "started_at":         attempt.started_at,
-                "questions":          self._questions_data_for_student(quiz),
+                "quiz_id": quiz.id,
+                "title": quiz.title,
+                "duration_minutes": quiz.duration_minutes,
+                "started_at": attempt.started_at,
+                "questions": self._questions_data_for_student(quiz),
             },
             status=status.HTTP_201_CREATED,
         )
@@ -1663,18 +2191,24 @@ class QuizViewSet(ModelViewSet):
         invalidate_offering_cache(quiz.course_offering_id)
         invalidate_quiz_caches(quiz)
         attempt.refresh_from_db()
+        response_data = {
+            **QuizAttemptSerializer(attempt).data,  # keeps attempt.status
+            "quiz_title":  quiz.title,
+            "correct_count": correct_count,
+            "total_questions": quiz.questions.count(),
+            "reveal_grade": quiz.reveal_grade,
+            "quiz_status": quiz.status,
+        }
 
-        return Response(
-            {
-                **QuizAttemptSerializer(attempt).data,
-                "quiz_title":  quiz.title,
-                "total_marks": quiz.total_marks,
-                "correct_count": correct_count,
-                "passed":      (attempt.percentage or 0) >= 50,
-                "total_questions": quiz.questions.count(),
-            },
-            status=status.HTTP_200_OK,
-        )
+        if quiz.reveal_grade:
+            response_data.update({
+                "marks_obtained": attempt.marks_obtained,
+                "total_marks":    quiz.total_marks,
+                "percentage":     attempt.percentage,
+                "passed":         (attempt.percentage or 0) >= 50,
+            })
+
+        return Response(response_data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get"])
     def result(self, request, pk=None):
@@ -1689,6 +2223,10 @@ class QuizViewSet(ModelViewSet):
 
         if not attempt:
             return Response({"error": "No submitted attempt found for this quiz."}, status=status.HTTP_404_NOT_FOUND)
+        
+        if not quiz.reveal_grade:
+            return Response({"error": "Grades have not been released yet."}, status=status.HTTP_403_FORBIDDEN)
+
 
         cache_key = CacheKeys.attempt_result(attempt.id)
         data      = cache.get(cache_key)
@@ -1701,3 +2239,39 @@ class QuizViewSet(ModelViewSet):
             }
             cache.set(cache_key, data, CACHE_TTL["attempt_result"])
         return Response(data)
+
+    def _questions_data_with_answers(self, quiz):
+        """Full question data including is_correct — for review mode only after submission."""
+        from .serializers import QuestionSerializer
+        questions = quiz.questions.prefetch_related("choices", "answer_keys").order_by("order")
+        return QuestionSerializer(questions, many=True).data
+
+    @action(detail=True, methods=["get"], url_path="review")
+    def review(self, request, pk=None):
+        """
+        Returns questions with correct answers revealed.
+        Only available to students who have a submitted/graded attempt.
+        """
+        quiz    = self.get_object()
+        student = request.user.student
+
+        has_attempt = QuizAttempt.objects.filter(
+            quiz=quiz,
+            student=student,
+            status__in=[
+                QuizAttempt.StatusChoices.SUBMITTED,
+                QuizAttempt.StatusChoices.GRADED,
+            ]
+        ).exists()
+
+        if not has_attempt:
+            return Response(
+                {"error": "You must complete the quiz before reviewing answers."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        return Response({
+            "quiz_id":   quiz.id,
+            "title":     quiz.title,
+            "questions": self._questions_data_with_answers(quiz),
+        })

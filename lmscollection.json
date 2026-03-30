@@ -1,0 +1,1212 @@
+{
+  "info": {
+    "name": "EduLink LMS API",
+    "description": "Complete API collection for the EduLink Learning Management System. Set the `base_url` and `token` collection variables before running requests.\n\nAuth flow:\n1. Run **Login** under the Users folder\n2. The `token` variable is set automatically via the test script\n3. All subsequent requests use Bearer {{token}}",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000/api",
+      "type": "string",
+      "description": "Change to your deployed API base URL"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string",
+      "description": "Populated automatically by the Login request test script"
+    },
+    {
+      "key": "refresh_token",
+      "value": "",
+      "type": "string",
+      "description": "Populated automatically by the Login request test script"
+    }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "1. Users",
+      "item": [
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.access_token) {",
+                  "    pm.collectionVariables.set('token', json.access_token);",
+                  "    pm.collectionVariables.set('refresh_token', json.refresh_token);",
+                  "    pm.test('Login successful – token saved', () => pm.response.to.have.status(200));",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role\": \"student\",\n  \"school_id\": \"SCI-2024-001\",\n  \"password\": \"secret\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/users/login/",
+              "host": ["{{base_url}}"],
+              "path": ["users", "login", ""]
+            },
+            "description": "Authenticate and receive JWT tokens. The test script saves `access_token` into the `token` collection variable automatically.\n\nRole must be one of: `student`, `teacher`, `principal`, `admin`."
+          }
+        },
+        {
+          "name": "Get Current User (me)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/users/me/",
+              "host": ["{{base_url}}"],
+              "path": ["users", "me", ""]
+            },
+            "description": "Returns the authenticated user's profile. Response is cached server-side."
+          }
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": {
+              "raw": "{{base_url}}/users/logout/",
+              "host": ["{{base_url}}"],
+              "path": ["users", "logout", ""]
+            },
+            "description": "Invalidates the cached login token for the current user."
+          }
+        },
+        {
+          "name": "List Users",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/users/",
+              "host": ["{{base_url}}"],
+              "path": ["users", ""]
+            },
+            "description": "Admin/staff see all users. Other roles see only their own record."
+          }
+        },
+        {
+          "name": "Create User",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"school_id\": \"SCI-2024-099\",\n  \"role\": \"student\",\n  \"email\": \"newstudent@school.edu\",\n  \"first_name\": \"Ama\",\n  \"last_name\": \"Serwaa\",\n  \"password\": \"changeme123\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/users/",
+              "host": ["{{base_url}}"],
+              "path": ["users", ""]
+            },
+            "description": "Admin only."
+          }
+        },
+        {
+          "name": "Retrieve User",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/users/1/",
+              "host": ["{{base_url}}"],
+              "path": ["users", "1", ""]
+            }
+          }
+        },
+        {
+          "name": "Update User (PUT)",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"school_id\": \"SCI-2024-001\",\n  \"role\": \"student\",\n  \"email\": \"updated@school.edu\",\n  \"first_name\": \"Kwame\",\n  \"last_name\": \"Asare\",\n  \"password\": \"newpassword\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/users/1/",
+              "host": ["{{base_url}}"],
+              "path": ["users", "1", ""]
+            },
+            "description": "Admin only. Full update."
+          }
+        },
+        {
+          "name": "Update User (PATCH)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"patched@school.edu\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/users/1/",
+              "host": ["{{base_url}}"],
+              "path": ["users", "1", ""]
+            },
+            "description": "Admin only. Partial update."
+          }
+        },
+        {
+          "name": "Delete User",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/users/1/",
+              "host": ["{{base_url}}"],
+              "path": ["users", "1", ""]
+            },
+            "description": "Admin only."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Students",
+      "item": [
+        {
+          "name": "List Students",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/students/",
+              "host": ["{{base_url}}"],
+              "path": ["students", ""]
+            },
+            "description": "Scoped by role: admin → all, teacher → enrolled students, student → own record."
+          }
+        },
+        {
+          "name": "Create Student",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user\": 5,\n  \"programme\": 1,\n  \"level\": 2\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/students/",
+              "host": ["{{base_url}}"],
+              "path": ["students", ""]
+            },
+            "description": "Admin only."
+          }
+        },
+        {
+          "name": "Get My Profile (me)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/students/me/",
+              "host": ["{{base_url}}"],
+              "path": ["students", "me", ""]
+            },
+            "description": "Student role only. Response is cached."
+          }
+        },
+        {
+          "name": "Filter Students by Programme",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/students/by_programme/?programme=1&level=2",
+              "host": ["{{base_url}}"],
+              "path": ["students", "by_programme", ""],
+              "query": [
+                { "key": "programme", "value": "1", "description": "Programme ID" },
+                { "key": "level",     "value": "2", "description": "Year level" }
+              ]
+            },
+            "description": "Response cached per filter combination."
+          }
+        },
+        {
+          "name": "Retrieve Student",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/students/1/",
+              "host": ["{{base_url}}"],
+              "path": ["students", "1", ""]
+            }
+          }
+        },
+        {
+          "name": "Update Student (PUT)",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user\": 5,\n  \"programme\": 1,\n  \"level\": 3\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/students/1/",
+              "host": ["{{base_url}}"],
+              "path": ["students", "1", ""]
+            },
+            "description": "Admin only. Clears student cache on save."
+          }
+        },
+        {
+          "name": "Update Student (PATCH)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"level\": 3\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/students/1/",
+              "host": ["{{base_url}}"],
+              "path": ["students", "1", ""]
+            },
+            "description": "Admin only. Clears student cache on save."
+          }
+        },
+        {
+          "name": "Delete Student",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/students/1/",
+              "host": ["{{base_url}}"],
+              "path": ["students", "1", ""]
+            },
+            "description": "Admin only. Clears student cache before deletion."
+          }
+        },
+        {
+          "name": "Get Student Enrollments",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/students/1/enrollments/",
+              "host": ["{{base_url}}"],
+              "path": ["students", "1", "enrollments", ""]
+            },
+            "description": "Student (own), teacher (enrolled students), or admin. Response is cached."
+          }
+        },
+        {
+          "name": "Get Student Assignments",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/students/1/assignments/",
+              "host": ["{{base_url}}"],
+              "path": ["students", "1", "assignments", ""]
+            },
+            "description": "Published assignments for the student's current-term enrollments. Response is cached."
+          }
+        },
+        {
+          "name": "Get Student Submissions",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/students/1/submissions/",
+              "host": ["{{base_url}}"],
+              "path": ["students", "1", "submissions", ""]
+            },
+            "description": "All submissions by the student with graded count. Response is cached."
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Teachers",
+      "item": [
+        {
+          "name": "List Teachers",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/teachers/",
+              "host": ["{{base_url}}"],
+              "path": ["teachers", ""]
+            },
+            "description": "Scoped by role: admin → all, teacher → own record, student → teachers of enrolled courses."
+          }
+        },
+        {
+          "name": "Create Teacher",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user\": 10,\n  \"department\": \"Mathematics\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/teachers/",
+              "host": ["{{base_url}}"],
+              "path": ["teachers", ""]
+            },
+            "description": "Admin only."
+          }
+        },
+        {
+          "name": "Get My Profile (me)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/teachers/me/",
+              "host": ["{{base_url}}"],
+              "path": ["teachers", "me", ""]
+            },
+            "description": "Teacher role only. Response is cached."
+          }
+        },
+        {
+          "name": "Filter Teachers by Department",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/teachers/by_department/?department=math",
+              "host": ["{{base_url}}"],
+              "path": ["teachers", "by_department", ""],
+              "query": [
+                { "key": "department", "value": "math", "description": "Case-insensitive partial match" }
+              ]
+            },
+            "description": "Response is cached per department value."
+          }
+        },
+        {
+          "name": "Retrieve Teacher",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/teachers/1/",
+              "host": ["{{base_url}}"],
+              "path": ["teachers", "1", ""]
+            }
+          }
+        },
+        {
+          "name": "Update Teacher (PUT)",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user\": 10,\n  \"department\": \"Further Mathematics\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/teachers/1/",
+              "host": ["{{base_url}}"],
+              "path": ["teachers", "1", ""]
+            },
+            "description": "Admin only. Clears teacher cache on save."
+          }
+        },
+        {
+          "name": "Update Teacher (PATCH)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"department\": \"Further Mathematics\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/teachers/1/",
+              "host": ["{{base_url}}"],
+              "path": ["teachers", "1", ""]
+            },
+            "description": "Admin only. Clears teacher cache on save."
+          }
+        },
+        {
+          "name": "Delete Teacher",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/teachers/1/",
+              "host": ["{{base_url}}"],
+              "path": ["teachers", "1", ""]
+            },
+            "description": "Admin only. Clears teacher cache before deletion."
+          }
+        },
+        {
+          "name": "Get Teacher Courses",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/teachers/1/courses/",
+              "host": ["{{base_url}}"],
+              "path": ["teachers", "1", "courses", ""]
+            },
+            "description": "Course offerings assigned to the teacher. Response is cached."
+          }
+        },
+        {
+          "name": "Get Teacher Assignments",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/teachers/1/assignments/",
+              "host": ["{{base_url}}"],
+              "path": ["teachers", "1", "assignments", ""]
+            },
+            "description": "All assignments created by the teacher. Response is cached."
+          }
+        },
+        {
+          "name": "Get Teacher Students",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/teachers/1/students/",
+              "host": ["{{base_url}}"],
+              "path": ["teachers", "1", "students", ""]
+            },
+            "description": "All students enrolled in any of the teacher's courses. Response is cached."
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Principals",
+      "item": [
+        {
+          "name": "List Principals",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/principals/",
+              "host": ["{{base_url}}"],
+              "path": ["principals", ""]
+            }
+          }
+        },
+        {
+          "name": "Create Principal",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user\": 20\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/principals/",
+              "host": ["{{base_url}}"],
+              "path": ["principals", ""]
+            },
+            "description": "Admin only."
+          }
+        },
+        {
+          "name": "Get My Profile (me)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/principals/me/",
+              "host": ["{{base_url}}"],
+              "path": ["principals", "me", ""]
+            },
+            "description": "Principal role only."
+          }
+        },
+        {
+          "name": "Dashboard",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/principals/dashboard/",
+              "host": ["{{base_url}}"],
+              "path": ["principals", "dashboard", ""]
+            },
+            "description": "Principal role only. School-wide aggregate stats. Response is cached (10 min TTL)."
+          }
+        },
+        {
+          "name": "Retrieve Principal",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/principals/1/",
+              "host": ["{{base_url}}"],
+              "path": ["principals", "1", ""]
+            }
+          }
+        },
+        {
+          "name": "Update Principal (PUT)",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"user\": 20\n}" },
+            "url": {
+              "raw": "{{base_url}}/principals/1/",
+              "host": ["{{base_url}}"],
+              "path": ["principals", "1", ""]
+            },
+            "description": "Admin only."
+          }
+        },
+        {
+          "name": "Update Principal (PATCH)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"user\": 20\n}" },
+            "url": {
+              "raw": "{{base_url}}/principals/1/",
+              "host": ["{{base_url}}"],
+              "path": ["principals", "1", ""]
+            },
+            "description": "Admin only."
+          }
+        },
+        {
+          "name": "Delete Principal",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/principals/1/",
+              "host": ["{{base_url}}"],
+              "path": ["principals", "1", ""]
+            },
+            "description": "Admin only."
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Programmes",
+      "item": [
+        {
+          "name": "List Programmes",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/programmes/",
+              "host": ["{{base_url}}"],
+              "path": ["programmes", ""]
+            },
+            "description": "Response is cached (30 min TTL)."
+          }
+        },
+        {
+          "name": "Create Programme",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Visual Arts\",\n  \"description\": \"Fine and visual arts track\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/programmes/",
+              "host": ["{{base_url}}"],
+              "path": ["programmes", ""]
+            },
+            "description": "Admin only. Clears programme list and principal dashboard caches."
+          }
+        },
+        {
+          "name": "Retrieve Programme",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/programmes/1/",
+              "host": ["{{base_url}}"],
+              "path": ["programmes", "1", ""]
+            },
+            "description": "Response is cached (30 min TTL)."
+          }
+        },
+        {
+          "name": "Update Programme (PUT)",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Science\",\n  \"description\": \"Updated science programme\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/programmes/1/",
+              "host": ["{{base_url}}"],
+              "path": ["programmes", "1", ""]
+            },
+            "description": "Admin only. Clears all programme-related caches."
+          }
+        },
+        {
+          "name": "Update Programme (PATCH)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"description\": \"Patched description\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/programmes/1/",
+              "host": ["{{base_url}}"],
+              "path": ["programmes", "1", ""]
+            },
+            "description": "Admin only."
+          }
+        },
+        {
+          "name": "Delete Programme",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/programmes/1/",
+              "host": ["{{base_url}}"],
+              "path": ["programmes", "1", ""]
+            },
+            "description": "Admin only. Clears all programme-related caches before deletion."
+          }
+        },
+        {
+          "name": "Get Programme Students",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/programmes/1/students/",
+              "host": ["{{base_url}}"],
+              "path": ["programmes", "1", "students", ""]
+            },
+            "description": "Response is cached."
+          }
+        },
+        {
+          "name": "Get Programme Electives (all)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/programmes/1/electives/",
+              "host": ["{{base_url}}"],
+              "path": ["programmes", "1", "electives", ""]
+            },
+            "description": "Returns bare Course objects. Response is cached."
+          }
+        },
+        {
+          "name": "Get Programme Electives (filtered)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/programmes/1/electives/?level=2&term=1",
+              "host": ["{{base_url}}"],
+              "path": ["programmes", "1", "electives", ""],
+              "query": [
+                { "key": "level", "value": "2" },
+                { "key": "term",  "value": "1" }
+              ]
+            },
+            "description": "Returns CourseOffering objects when both level and term are supplied. Cached per combo."
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Courses",
+      "item": [
+        {
+          "name": "List Courses",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/courses/",
+              "host": ["{{base_url}}"],
+              "path": ["courses", ""],
+              "query": [
+                { "key": "course_type", "value": "CORE",    "disabled": true },
+                { "key": "programme",   "value": "1",       "disabled": true }
+              ]
+            },
+            "description": "Response cached per filter combination."
+          }
+        },
+        {
+          "name": "Create Course",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Physics\",\n  \"code_prefix\": \"PHY\",\n  \"course_type\": \"ELECTIVE\",\n  \"programmes\": [1]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/courses/",
+              "host": ["{{base_url}}"],
+              "path": ["courses", ""]
+            },
+            "description": "Admin only."
+          }
+        },
+        {
+          "name": "Retrieve Course",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/courses/1/",
+              "host": ["{{base_url}}"],
+              "path": ["courses", "1", ""]
+            },
+            "description": "Response is cached (30 min TTL)."
+          }
+        },
+        {
+          "name": "Update Course (PUT)",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Physics\",\n  \"code_prefix\": \"PHY\",\n  \"course_type\": \"ELECTIVE\",\n  \"programmes\": [1, 2]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/courses/1/",
+              "host": ["{{base_url}}"],
+              "path": ["courses", "1", ""]
+            },
+            "description": "Admin only. Clears all course-related caches."
+          }
+        },
+        {
+          "name": "Update Course (PATCH)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"programmes\": [1, 2]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/courses/1/",
+              "host": ["{{base_url}}"],
+              "path": ["courses", "1", ""]
+            },
+            "description": "Admin only."
+          }
+        },
+        {
+          "name": "Delete Course",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/courses/1/",
+              "host": ["{{base_url}}"],
+              "path": ["courses", "1", ""]
+            },
+            "description": "Admin only."
+          }
+        },
+        {
+          "name": "Get Course Offerings",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/courses/1/offerings/",
+              "host": ["{{base_url}}"],
+              "path": ["courses", "1", "offerings", ""],
+              "query": [
+                { "key": "level", "value": "2", "disabled": true },
+                { "key": "term",  "value": "1", "disabled": true }
+              ]
+            },
+            "description": "Active offerings for a course. Cached per filter combo."
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Course Offerings",
+      "item": [
+        {
+          "name": "List Offerings",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/offerings/",
+              "host": ["{{base_url}}"],
+              "path": ["offerings", ""],
+              "query": [
+                { "key": "level",       "value": "2",        "disabled": true },
+                { "key": "term",        "value": "1",        "disabled": true },
+                { "key": "course_type", "value": "ELECTIVE", "disabled": true },
+                { "key": "programme",   "value": "1",        "disabled": true }
+              ]
+            },
+            "description": "Scoped by role. Students see current term only; teachers see assigned offerings (no filters)."
+          }
+        },
+        {
+          "name": "Create Offering",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"course\": 5,\n  \"level\": 2,\n  \"term\": 1,\n  \"academic_year\": \"2025/2026\",\n  \"is_active\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/offerings/",
+              "host": ["{{base_url}}"],
+              "path": ["offerings", ""]
+            },
+            "description": "Admin only."
+          }
+        },
+        {
+          "name": "Retrieve Offering",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/offerings/1/",
+              "host": ["{{base_url}}"],
+              "path": ["offerings", "1", ""]
+            }
+          }
+        },
+        {
+          "name": "Update Offering (PUT)",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"course\": 5,\n  \"level\": 2,\n  \"term\": 1,\n  \"academic_year\": \"2025/2026\",\n  \"is_active\": false\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/offerings/1/",
+              "host": ["{{base_url}}"],
+              "path": ["offerings", "1", ""]
+            },
+            "description": "Admin only. Clears offering and parent course caches."
+          }
+        },
+        {
+          "name": "Update Offering (PATCH)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"is_active\": false\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/offerings/1/",
+              "host": ["{{base_url}}"],
+              "path": ["offerings", "1", ""]
+            },
+            "description": "Admin only."
+          }
+        },
+        {
+          "name": "Delete Offering",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/offerings/1/",
+              "host": ["{{base_url}}"],
+              "path": ["offerings", "1", ""]
+            },
+            "description": "Admin only. Clears offering and course caches before deletion."
+          }
+        },
+        {
+          "name": "Get Offering Enrollments",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/offerings/1/enrollments/",
+              "host": ["{{base_url}}"],
+              "path": ["offerings", "1", "enrollments", ""]
+            },
+            "description": "Teacher (assigned) or Admin only. Response is cached."
+          }
+        },
+        {
+          "name": "Get Offering Assignments",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/offerings/1/assignments/",
+              "host": ["{{base_url}}"],
+              "path": ["offerings", "1", "assignments", ""]
+            },
+            "description": "Students see PUBLISHED only; teachers/admins see all. Response is cached."
+          }
+        },
+        {
+          "name": "Get Offering Quizzes",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/offerings/1/quizzes/",
+              "host": ["{{base_url}}"],
+              "path": ["offerings", "1", "quizzes", ""]
+            },
+            "description": "Students see PUBLISHED only; teachers/admins see all. Response is cached."
+          }
+        }
+      ]
+    },
+    {
+      "name": "8. Enrollments",
+      "item": [
+        {
+          "name": "List Enrollments",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/enrollments/",
+              "host": ["{{base_url}}"],
+              "path": ["enrollments", ""]
+            },
+            "description": "Scoped: admin → all, student → own current-term, teacher → their offerings."
+          }
+        },
+        {
+          "name": "Create Enrollment",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"student\": 1,\n  \"course_offering\": 3,\n  \"is_core\": false\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/enrollments/",
+              "host": ["{{base_url}}"],
+              "path": ["enrollments", ""]
+            },
+            "description": "Admin only. Clears student, offering, and teacher caches."
+          }
+        },
+        {
+          "name": "Get My Enrollments",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/enrollments/my_enrollments/",
+              "host": ["{{base_url}}"],
+              "path": ["enrollments", "my_enrollments", ""]
+            },
+            "description": "Student only. Current-term enrollments split into core and elective. Response is cached."
+          }
+        },
+        {
+          "name": "Bulk Enroll Students",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"student_ids\": [1, 2, 3, 4],\n  \"course_offering_id\": 3,\n  \"is_core\": false\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/enrollments/bulk_enroll/",
+              "host": ["{{base_url}}"],
+              "path": ["enrollments", "bulk_enroll", ""]
+            },
+            "description": "Admin only. Skips already-enrolled students. Clears per-student and offering caches."
+          }
+        },
+        {
+          "name": "Retrieve Enrollment",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/enrollments/1/",
+              "host": ["{{base_url}}"],
+              "path": ["enrollments", "1", ""]
+            }
+          }
+        },
+        {
+          "name": "Update Enrollment (PUT)",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"grade\": \"A\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/enrollments/1/",
+              "host": ["{{base_url}}"],
+              "path": ["enrollments", "1", ""]
+            },
+            "description": "Teacher or Admin. Teachers may only send the `grade` field."
+          }
+        },
+        {
+          "name": "Update Enrollment (PATCH)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"grade\": \"B\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/enrollments/1/",
+              "host": ["{{base_url}}"],
+              "path": ["enrollments", "1", ""]
+            },
+            "description": "Teacher or Admin. Teachers may only send the `grade` field."
+          }
+        },
+        {
+          "name": "Delete Enrollment",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/enrollments/1/",
+              "host": ["{{base_url}}"],
+              "path": ["enrollments", "1", ""]
+            },
+            "description": "Admin only. Clears student, offering, and teacher caches before deletion."
+          }
+        },
+        {
+          "name": "Update Grade",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"grade\": \"A\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/enrollments/1/update_grade/",
+              "host": ["{{base_url}}"],
+              "path": ["enrollments", "1", "update_grade", ""]
+            },
+            "description": "Teacher (assigned to this offering) or Admin. Clears student and offering caches on save."
+          }
+        }
+      ]
+    },
+    {
+      "name": "9. Assignments",
+      "item": [
+        {
+          "name": "List Assignments",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/assignments/",
+              "host": ["{{base_url}}"],
+              "path": ["assignments", ""]
+            },
+            "description": "Scoped: teacher → own, student → PUBLISHED in enrolled offerings, admin → all."
+          }
+        },
+        {
+          "name": "Create Assignment",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Quadratic Equations Problem Set\",\n  \"description\": \"Solve problems 1–20 from chapter 4.\",\n  \"course_offering\": 3,\n  \"due_date\": \"2026-02-25T23:59:00Z\",\n  \"status\": \"PUBLISHED\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/assignments/",
+              "host": ["{{base_url}}"],
+              "path": ["assignments", ""]
+            },
+            "description": "Teacher only. The `teacher` field is set automatically — do not include it. Clears offering, teacher, and student caches."
+          }
+        },
+        {
+          "name": "Retrieve Assignment",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/assignments/1/",
+              "host": ["{{base_url}}"],
+              "path": ["assignments", "1", ""]
+            }
+          }
+        },
+        {
+          "name": "Update Assignment (PUT)",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Quadratic Equations – Updated\",\n  \"description\": \"Solve problems 1–25 from chapter 4.\",\n  \"course_offering\": 3,\n  \"due_date\": \"2026-02-28T23:59:00Z\",\n  \"status\": \"PUBLISHED\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/assignments/1/",
+              "host": ["{{base_url}}"],
+              "path": ["assignments", "1", ""]
+            },
+            "description": "Teacher (of this course) or Admin. Clears offering, teacher, and student caches."
+          }
+        },
+        {
+          "name": "Update Assignment (PATCH)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"due_date\": \"2026-03-01T23:59:00Z\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/assignments/1/",
+              "host": ["{{base_url}}"],
+              "path": ["assignments", "1", ""]
+            },
+            "description": "Teacher (of this course) or Admin."
+          }
+        },
+        {
+          "name": "Delete Assignment",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/assignments/1/",
+              "host": ["{{base_url}}"],
+              "path": ["assignments", "1", ""]
+            },
+            "description": "Teacher (of this course) or Admin. Clears offering, teacher, and student caches before deletion."
+          }
+        }
+      ]
+    }
+  ]
+}

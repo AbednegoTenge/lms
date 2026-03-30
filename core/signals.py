@@ -58,7 +58,6 @@ def enroll_in_core_courses(sender, instance, created, **kwargs):
                 course__course_type='CORE',
                 level=instance.level,              #Student's level
                 term=current_term.term_number,
-                academic_year=current_term.academic_year,
                 is_active=True
             )
             

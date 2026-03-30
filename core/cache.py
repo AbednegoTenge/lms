@@ -59,6 +59,9 @@ CACHE_TTL = {
     "offering_enrollments": 60 * 10,
     "offering_assignments": 60 * 10,
     "offering_quizzes":     60 * 10,
+    "offering_weeks":       60 * 10,
+    "offering_resources":   60 * 10,
+    "offering_stats":       60 * 10,
 
     "my_enrollments":       60 * 10,
     "quiz_detail":          60 * 10,
@@ -216,6 +219,18 @@ class CacheKeys:
         return f"lms:offering:{offering_id}:quizzes"
 
     @staticmethod
+    def offering_outline(offering_id: int) -> str:
+        return f"lms:offering:{offering_id}:outline"
+
+    @staticmethod
+    def offering_resources(offering_id: int) -> str:
+        return f"lms:offering:{offering_id}:resources"
+
+    @staticmethod
+    def offering_stats(offering_id: int) -> str:
+        return f"lms:offering:{offering_id}:stats"
+
+    @staticmethod
     def quiz_detail(quiz_id):
         return f"quiz_{quiz_id}_detail"
 
@@ -296,6 +311,9 @@ def invalidate_offering_cache(offering_id: int) -> None:
         CacheKeys.offering_enrollments(offering_id),
         CacheKeys.offering_assignments(offering_id),
         CacheKeys.offering_quizzes(offering_id),
+        CacheKeys.offering_outline(offering_id),
+        CacheKeys.offering_resources(offering_id),
+        CacheKeys.offering_stats(offering_id),
         CacheKeys.principal_dashboard(),
     ])
 
@@ -333,6 +351,9 @@ def invalidate_course_cache(course_pk, offering_id: int = None) -> None:
             CacheKeys.offering_enrollments(offering_id),
             CacheKeys.offering_assignments(offering_id),
             CacheKeys.offering_quizzes(offering_id),
+            CacheKeys.offering_outline(offering_id),
+            CacheKeys.offering_resources(offering_id),
+            CacheKeys.offering_stats(offering_id),
         ]
     cache.delete_many(keys)
 
@@ -349,7 +370,8 @@ def invalidate_assignment_caches(assignment) -> None:
     from .models import Enrollment, Student  # local import avoids circular deps
 
     invalidate_offering_cache(assignment.course_offering_id)
-    invalidate_teacher_cache(assignment.teacher)
+    if assignment.teacher:
+        invalidate_teacher_cache(assignment.teacher)
 
     student_ids = (
         Enrollment.objects
@@ -374,8 +396,16 @@ def invalidate_enrollment_caches(enrollment) -> None:
     invalidate_student_cache(enrollment.student)
     invalidate_offering_cache(enrollment.course_offering_id)
 
-    for teacher in enrollment.course_offering.assigned_teachers.all():
+    for teacher in enrollment.course_offering.teachers.all():
         invalidate_teacher_cache(teacher)
+
+
+def invalidate_current_term_cache() -> None:
+    """Wipe cached current term and dashboard aggregates."""
+    cache.delete_many([
+        CacheKeys.current_term(),
+        CacheKeys.principal_dashboard(),
+    ])
 
 def invalidate_submission_caches(submission) -> None:
     """
@@ -399,11 +429,13 @@ def invalidate_quiz_caches(quiz) -> None:
     """
     from .models import Enrollment, Student  # local import avoids circular deps
 
-    cache.delete_many([
+    keys = [
         CacheKeys.quiz_detail(quiz.id),
         CacheKeys.quiz_questions(quiz.id),
-        CacheKeys.teacher_quizzes(quiz.teacher_id),
-    ])
+    ]
+    if quiz.teacher_id:
+        keys.append(CacheKeys.teacher_quizzes(quiz.teacher_id))
+    cache.delete_many(keys)
     invalidate_offering_cache(quiz.course_offering_id)
 
     student_ids = (

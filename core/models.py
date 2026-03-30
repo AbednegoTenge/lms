@@ -63,6 +63,11 @@ class Student(models.Model):
             (3, 'Level 3'),
         ]
     )
+
+    section = models.ForeignKey(
+        'Section', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='students'
+    )
     
     current_gpa = models.DecimalField(max_digits=4, decimal_places=2, null=True, blank=True)
     cumulative_gpa = models.DecimalField(max_digits=4, decimal_places=2, null=True, blank=True)
@@ -188,6 +193,7 @@ class CourseOffering(models.Model):
     term = models.IntegerField(choices=TERM_CHOICES)
     is_active = models.BooleanField(default=True)
     weeks = models.CharField(max_length=30)
+    room = models.CharField(max_length=20, default='')
     
     @property
     def course_code(self):
@@ -285,6 +291,40 @@ class AcademicTerm(models.Model):
     class Meta:
         ordering = ['-start_date']
 
+class Section(models.Model):
+    """A class/section within a level and programme (e.g. Level 1 Gen Arts - Section A)"""
+    name        = models.CharField(max_length=10)  # e.g. 'A', 'B', 'C'
+    level       = models.IntegerField(choices=[(1,'Level 1'),(2,'Level 2'),(3,'Level 3')])
+    programme   = models.ForeignKey('Programme', on_delete=models.CASCADE, related_name='sections')
+    capacity    = models.PositiveIntegerField(default=40)
+    is_active   = models.BooleanField(default=True)
+
+    class Meta:
+        unique_together = ['name', 'level', 'programme']
+        ordering = ['level', 'name']
+
+    def __str__(self):
+        return f"{self.programme.name} - Level {self.level} - Section {self.name}"
+
+
+class CourseOfferingTeacher(models.Model):
+    """
+    Assigns a teacher to a CourseOffering for a specific section (core)
+    or as the sole teacher (elective, section=None).
+    """
+    course_offering = models.ForeignKey(CourseOffering, on_delete=models.CASCADE, related_name='teaching_slots')
+    teacher = models.ForeignKey('Teacher', on_delete=models.CASCADE, related_name='teaching_slots')
+    section = models.ForeignKey(Section, on_delete=models.SET_NULL, null=True, blank=True, related_name='teaching_slots')
+    room = models.CharField(max_length=20)
+
+    class Meta:
+        # A teacher can only have one slot per offering per section
+        unique_together = ['course_offering', 'section']
+        ordering = ['course_offering', 'section__name']
+
+    def __str__(self):
+        section_label = self.section.name if self.section else 'Elective'
+        return f"{self.course_offering.course_code} - {self.teacher} - Section {section_label}"
 
 class Enrollment(models.Model):
     student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='enrollments')
@@ -293,6 +333,10 @@ class Enrollment(models.Model):
     is_active = models.BooleanField(default=True)
     is_core = models.BooleanField(default=False)
     grade = models.CharField(max_length=2, blank=True, null=True)
+    teaching_slot = models.ForeignKey(
+        'CourseOfferingTeacher', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='enrollments'
+    )
     
     class Meta:
         unique_together = ['student', 'course_offering']
@@ -464,29 +508,28 @@ class Submission(models.Model):
         if not self.text_answer and not self.file:
             raise ValidationError("Submission must have either a text answer or a file.")
         
-        if self.marks_obtained and self.marks_obtained > self.assignment.total_marks:
+        if self.marks_obtained is not None and self.marks_obtained > self.assignment.total_marks:
             raise ValidationError("Marks cannot exceed total marks.")
+        if self.marks_obtained is not None and self.marks_obtained < 0:
+            raise ValidationError("Marks cannot be negative.")
 
-        # Block submission if past due
-        if self.assignment.is_past_due:
-            raise ValidationError("This assignment is past its due date and is no longer accepting submissions.")
+        # Enforce attempt limit and due-date checks only for new submissions
+        if not self.pk:
+            if self.assignment.is_past_due:
+                raise ValidationError("This assignment is past its due date and is no longer accepting submissions.")
 
-        # Enforce attempt limit
-        existing_attempts = Submission.objects.filter(
-            assignment=self.assignment,
-            student=self.student,
-        )
-        if self.pk:
-            existing_attempts = existing_attempts.exclude(pk=self.pk)
-        
-        attempt_count = existing_attempts.count()
-
-        if attempt_count >= self.assignment.max_attempts:
-            raise ValidationError(
-                f"Maximum submission attempts ({self.assignment.max_attempts}) reached for this assignment."
+            existing_attempts = Submission.objects.filter(
+                assignment=self.assignment,
+                student=self.student,
             )
-        
-        self.attempt_number = attempt_count + 1
+            attempt_count = existing_attempts.count()
+
+            if attempt_count >= self.assignment.max_attempts:
+                raise ValidationError(
+                    f"Maximum submission attempts ({self.assignment.max_attempts}) reached for this assignment."
+                )
+
+            self.attempt_number = attempt_count + 1
 
     def save(self, *args, **kwargs):
         from django.utils import timezone
@@ -534,6 +577,7 @@ class Quiz(models.Model):
     max_attempts = models.PositiveSmallIntegerField(default=1)
     start_time = models.DateTimeField(null=True, blank=True)
     end_time = models.DateTimeField(null=True, blank=True)
+    reveal_grade = models.BooleanField(default=False, help_text="If true, student can see their grade after submission")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1009,3 +1053,16 @@ class GradeWeight(models.Model):
 
     def __str__(self):
         return f"{self.course_offering.course_code} — Assignments {self.assignments_weight}% / Quizzes {self.quizzes_weight}%"
+
+class TimeSlot(models.Model):
+    DAY_CHOICES = [
+        ('monday', 'Monday'), ('tuesday', 'Tuesday'), ('wednesday', 'Wednesday'),
+        ('thursday', 'Thursday'), ('friday', 'Friday'),
+    ]
+    teaching_slot = models.ForeignKey(CourseOfferingTeacher, on_delete=models.CASCADE, related_name='time_slots')
+    day = models.CharField(max_length=10, choices=DAY_CHOICES)
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+
+    class Meta:
+        ordering = ['day', 'start_time']

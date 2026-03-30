@@ -1,10 +1,10 @@
 from rest_framework import serializers
 from .models import (
-    User, Student, Teacher, Principal,
-    Programme, Course, CourseOffering, AcademicTerm, 
-    Enrollment, Assignment, Submission, Quiz, Question, 
+    User, Student, Teacher, Principal, Admin,
+    Programme, Course, CourseOffering, AcademicTerm,
+    Enrollment, Assignment, Submission, Quiz, Question,
     Choice, ShortAnswerKey, QuizAttempt, StudentAnswer,
-    CourseResource, CourseOutline
+    CourseResource, CourseOutline, GradeWeight
 )
 
 
@@ -60,14 +60,21 @@ class StudentSerializer(serializers.ModelSerializer):
     """Student serializer - handles everything"""
     user = UserSerializer()
     full_name = serializers.SerializerMethodField(read_only=True)
-    programme = serializers.StringRelatedField()
+    programme = serializers.StringRelatedField(read_only=True)
+    programme_id = serializers.PrimaryKeyRelatedField(
+        source='programme',
+        queryset=Programme.objects.all(),
+        write_only=True,
+        required=False,
+        allow_null=True,
+    )
     
     class Meta:
         model = Student
         fields = [
             'id', 'user', 'full_name', 'student_number', 'date_of_birth',
             'enrollment_date', 'gender', 'guardian_name', 'guardian_contact',
-            'level', 'current_gpa', 'cumulative_gpa', 'programme'
+            'level', 'current_gpa', 'cumulative_gpa', 'programme', 'programme_id'
         ]
         read_only_fields = ['student_number']
     
@@ -189,9 +196,21 @@ class ProgrammeSerializer(serializers.ModelSerializer):
 
 
 class CourseSerializer(serializers.ModelSerializer):
+    programmes = serializers.StringRelatedField(many=True, read_only=True)
+    programme_ids = serializers.PrimaryKeyRelatedField(
+        source='programmes',
+        queryset=Programme.objects.all(),
+        many=True,
+        write_only=True,
+        required=False,
+    )
+
     class Meta:
         model = Course
-        fields = ['id', 'name', 'code_prefix', 'course_type', 'description', 'credits']
+        fields = [
+            'id', 'name', 'code_prefix', 'course_type', 'description', 'credits',
+            'programmes', 'programme_ids',
+        ]
 
 
 class CourseOfferingSerializer(serializers.ModelSerializer):
@@ -199,22 +218,41 @@ class CourseOfferingSerializer(serializers.ModelSerializer):
     course_code = serializers.CharField(read_only=True)
     course_type = serializers.CharField(source='course.course_type', read_only=True)
     progress = serializers.ReadOnlyField()
+    teachers = serializers.SerializerMethodField(read_only=True)
+    teacher_ids = serializers.PrimaryKeyRelatedField(
+        source='teachers',
+        many=True,
+        queryset=Teacher.objects.all(),
+        write_only=True,
+        required=False,
+    )
+    
+    def get_teachers(self, obj):
+        return [teacher.user.get_full_name() or "N/A" for teacher in obj.teachers.all()]
     
     class Meta:
         model = CourseOffering
         fields = ['id', 'course', 'course_name', 'course_code', 'course_type', 
-                  'level', 'term', 'is_active', 'progress']
+                  'level', 'term', 'weeks', 'is_active', 'progress', 'teachers', 'teacher_ids']
 
 class CourseOutlineSerializer(serializers.ModelSerializer):
+    course_offering = serializers.PrimaryKeyRelatedField(
+        queryset=CourseOffering.objects.all()
+    )
+
     class Meta:
         model  = CourseOutline
-        fields = ['id', 'week', 'title', 'description', 'topics', 'status']
+        fields = ['id', 'course_offering', 'week', 'title', 'description', 'topics', 'status']
 
 
 class CourseResourceSerializer(serializers.ModelSerializer):
+    course_offering = serializers.PrimaryKeyRelatedField(
+        queryset=CourseOffering.objects.all()
+    )
+
     class Meta:
         model  = CourseResource
-        fields = ['id', 'title', 'type', 'url', 'file', 'uploaded_at']
+        fields = ['id', 'course_offering', 'title', 'type', 'url', 'file', 'uploaded_at']
 
 class AcademicTermSerializer(serializers.ModelSerializer):
     class Meta:
@@ -223,16 +261,87 @@ class AcademicTermSerializer(serializers.ModelSerializer):
                   'end_date', 'is_current', 'elective_selection_open']
 
 
-class EnrollmentSerializer(serializers.ModelSerializer):
-    course_code = serializers.CharField(source='course_offering.course_code', read_only=True)
-    course_name = serializers.CharField(source='course_offering.course.name', read_only=True)
-    student_name = serializers.CharField(source='student.user.get_full_name', read_only=True)
-    
-    class Meta:
-        model = Enrollment
-        fields = ['id', 'student', 'student_name', 'course_offering', 'course_code', 
-                  'course_name', 'is_core', 'grade', 'is_active', 'enrolled_date']
+class AdminSerializer(serializers.ModelSerializer):
+    """Admin serializer - handles everything"""
+    user = UserSerializer()
+    full_name = serializers.SerializerMethodField(read_only=True)
 
+    class Meta:
+        model = Admin
+        fields = [
+            'id', 'user', 'full_name', 'employee_number',
+            'date_of_birth', 'hire_date', 'contact_number'
+        ]
+        read_only_fields = ['employee_number']
+
+    def get_full_name(self, obj):
+        return obj.user.get_full_name()
+
+    def create(self, validated_data):
+        user_data = validated_data.pop('user')
+        user_serializer = UserSerializer(data=user_data)
+        user_serializer.is_valid(raise_exception=True)
+        user = user_serializer.save()
+        user.is_staff = True
+        user.save(update_fields=['is_staff'])
+
+        admin = Admin.objects.create(user=user, **validated_data)
+        return admin
+
+    def update(self, instance, validated_data):
+        user_data = validated_data.pop('user', None)
+
+        if user_data:
+            user_serializer = UserSerializer(instance.user, data=user_data, partial=True)
+            user_serializer.is_valid(raise_exception=True)
+            user_serializer.save()
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+
+        instance.save()
+        return instance
+
+
+class EnrollmentSerializer(serializers.ModelSerializer):
+    course_code  = serializers.CharField(source='course_offering.course_code', read_only=True)
+    course_name  = serializers.CharField(source='course_offering.course.name', read_only=True)
+    student_name = serializers.CharField(source='student.user.get_full_name', read_only=True)
+    progress = serializers.IntegerField(source='course_offering.progress', read_only=True)
+    teacher = serializers.SerializerMethodField()
+    room = serializers.SerializerMethodField()
+    schedule = serializers.SerializerMethodField()
+
+    def get_teacher(self, obj):
+        if obj.teaching_slot:
+            return obj.teaching_slot.teacher.user.get_full_name()
+        return ''
+
+    def get_room(self, obj):
+        if obj.teaching_slot:
+            return obj.teaching_slot.room
+        return getattr(obj.course_offering, 'room', '')
+
+    def get_schedule(self, obj):
+        if not obj.teaching_slot:
+            return []
+        return [
+            {
+                'day':   slot.day,
+                'start': slot.start_time.strftime('%H:%M'),
+                'end':   slot.end_time.strftime('%H:%M'),
+            }
+            for slot in obj.teaching_slot.time_slots.all()
+        ]
+
+    class Meta:
+        model  = Enrollment
+        fields = [
+            'id', 'student', 'student_name', 'course_offering',
+            'course_code', 'course_name', 'is_core',
+            'grade', 'is_active', 'enrolled_date',
+            'teacher', 'room', 'schedule', 'progress',
+        ]
 
 class AssignmentSerializer(serializers.ModelSerializer):
     course_code = serializers.CharField(source='course_offering.course_code', read_only=True)
@@ -264,15 +373,23 @@ class SubmissionSerializer(serializers.ModelSerializer):
 
 
 class ChoiceSerializer(serializers.ModelSerializer):
+    question = serializers.PrimaryKeyRelatedField(
+        queryset=Question.objects.all()
+    )
+
     class Meta:
         model = Choice
-        fields = ['id', 'answer', 'is_correct', 'order']
+        fields = ['id', 'question', 'answer', 'is_correct', 'order']
 
 
 class ShortAnswerKeySerializer(serializers.ModelSerializer):
+    question = serializers.PrimaryKeyRelatedField(
+        queryset=Question.objects.all()
+    )
+
     class Meta:
         model = ShortAnswerKey
-        fields = ['id', 'text']
+        fields = ['id', 'question', 'text']
 
 
 class QuestionSerializer(serializers.ModelSerializer):
@@ -323,6 +440,16 @@ class QuizAttemptSerializer(serializers.ModelSerializer):
 class TokenRefreshResponseSerializer(serializers.Serializer):
     access = serializers.CharField()
     refresh = serializers.CharField()
+
+
+class GradeWeightSerializer(serializers.ModelSerializer):
+    course_offering = serializers.PrimaryKeyRelatedField(
+        queryset=CourseOffering.objects.all()
+    )
+
+    class Meta:
+        model = GradeWeight
+        fields = ['id', 'course_offering', 'assignments_weight', 'quizzes_weight']
 
 
 class GradebookEntrySerializer(serializers.Serializer):

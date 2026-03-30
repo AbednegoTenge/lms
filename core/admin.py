@@ -6,7 +6,8 @@ from .models import (
     Programme, Course, CourseOffering, AcademicTerm, 
     Enrollment, Submission, Assignment, Quiz, Question, 
     Choice, ShortAnswerKey, QuizAttempt, StudentAnswer,
-    CourseOutline, CourseResource, GradeWeight
+    CourseOutline, CourseResource, GradeWeight, Section,
+    CourseOfferingTeacher, TimeSlot
 )
 from django import forms
 from django.db.models import Q
@@ -50,7 +51,7 @@ class CourseOfferingAdmin(admin.ModelAdmin):
 class CourseOutlineAdmin(admin.ModelAdmin):
     list_display  = ['course_offering', 'week', 'title', 'status', 'topics', 'description']
     list_filter   = ['status', 'course_offering']
-    search_fields = ['title', 'course_offering__course_code']
+    search_fields = ['title', 'course_offering__course__name', 'course_offering__course__code_prefix']
 
 @admin.register(AcademicTerm)
 class AcademicTermAdmin(admin.ModelAdmin):
@@ -305,11 +306,11 @@ class QuestionInline(admin.TabularInline):
 class QuizAdmin(admin.ModelAdmin):
     list_display = [
         'title', 'course_offering', 'teacher', 'status',
-        'get_total_marks', 'duration_minutes', 'max_attempts',
+        'get_total_marks', 'duration_minutes', 'reveal_grade', 'max_attempts',
         'start_time', 'end_time', 'is_active', 'is_past_due'
     ]
     list_filter = ['status', 'course_offering', 'teacher']
-    search_fields = ['title', 'description', 'course_offering__course_code']
+    search_fields = ['title', 'description', 'course_offering__course__name', 'course_offering__course__code_prefix']
     readonly_fields = ['get_total_marks', 'is_active', 'is_past_due', 'created_at', 'updated_at']
     inlines = [QuestionInline]
 
@@ -318,7 +319,7 @@ class QuizAdmin(admin.ModelAdmin):
             'fields': ('course_offering', 'teacher', 'title', 'description')
         }),
         ('Settings', {
-            'fields': ('status', 'duration_minutes', 'max_attempts')
+            'fields': ('status', 'duration_minutes', 'max_attempts', 'reveal_grade')
         }),
         ('Schedule', {
             'fields': ('start_time', 'end_time')
@@ -398,7 +399,7 @@ class ChoiceAdmin(admin.ModelAdmin):
 @admin.register(ShortAnswerKey)
 class ShortAnswerKeyAdmin(admin.ModelAdmin):
     list_display = ['text', 'question']
-    search_fields = ['text', 'question__text']
+    search_fields = ['text', 'question__question']
     list_filter = ['question__quiz']
 
 
@@ -483,7 +484,7 @@ class StudentAnswerAdmin(admin.ModelAdmin):
     list_filter = ['is_correct', 'question__question_type', 'attempt__quiz']
     search_fields = [
         'attempt__student__student_number',
-        'question__text',
+        'question__question',
         'text_answer'
     ]
     readonly_fields = [
@@ -499,7 +500,7 @@ class StudentAnswerAdmin(admin.ModelAdmin):
     get_student.short_description = 'Student'
 
     def get_question(self, obj):
-        text = obj.question.text
+        text = obj.question.question
         return text[:50] + '...' if len(text) > 50 else text
     get_question.short_description = 'Question'
 
@@ -507,16 +508,34 @@ class StudentAnswerAdmin(admin.ModelAdmin):
         if obj.text_answer:
             return obj.text_answer[:60]
         if obj.selected_choice:
-            return obj.selected_choice.text
+            return obj.selected_choice.answer
         choices = obj.selected_choices.all()
         if choices.exists():
-            return ', '.join(c.text for c in choices)
+            return ', '.join(c.answer for c in choices)
         return '-'
 
 @admin.register(GradeWeight)
 class GradeWeightAdmin(admin.ModelAdmin):
     list_display  = ['course_offering', 'assignments_weight', 'quizzes_weight']
     list_editable = ['assignments_weight', 'quizzes_weight']
+
+@admin.register(Section)
+class SectionAdmin(admin.ModelAdmin):
+    list_display  = ['__str__', 'level', 'programme', 'capacity', 'is_active']
+    list_filter   = ['level', 'programme', 'is_active']
+
+
+@admin.register(CourseOfferingTeacher)
+class CourseOfferingTeacherAdmin(admin.ModelAdmin):
+    list_display  = ['course_offering', 'teacher', 'section', 'room']
+    list_filter   = ['course_offering__level', 'course_offering__term']
+    search_fields = ['course_offering__course__name', 'teacher__user__first_name']
+
+@admin.register(TimeSlot)
+class TimeSlotAdmin(admin.ModelAdmin):
+    list_display  = ['teaching_slot', 'day', 'start_time', 'end_time']
+    list_filter   = ['day', 'teaching_slot__course_offering__level']
+    ordering      = ['day', 'start_time']
 
 admin.site.register(Admin)
 admin.site.register(Principal)
