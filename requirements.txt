@@ -2,7 +2,7 @@ django
 djangorestframework
 psycopg2
 redis
-celery
+django-redis
 python-dotenv
 django-cors-headers
 pytest-django
@@ -11,4 +11,3 @@ boto3
 s3transfer
 django-storages
 djangorestframework-simplejwt
-django-cors-headers
