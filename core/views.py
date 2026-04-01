@@ -45,7 +45,7 @@ from .cache import (
     invalidate_current_term_cache
 )
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db.models import Max
+from django.db.models import Max, Count, Q, Sum, Prefetch
 
 
 def get_current_term():
@@ -784,7 +784,7 @@ class CourseViewSet(ModelViewSet):
         return Response(data)
 
 class CourseOfferingViewSet(ModelViewSet):
-    queryset           = CourseOffering.objects.select_related("course").all()
+    queryset           = CourseOffering.objects.select_related("course").prefetch_related("outline").all()
     serializer_class   = CourseOfferingSerializer
     permission_classes = [IsAuthenticated]
 
@@ -794,7 +794,7 @@ class CourseOfferingViewSet(ModelViewSet):
         return [IsAuthenticated()]
 
     def get_queryset(self):
-        queryset = CourseOffering.objects.select_related("course")
+        queryset = CourseOffering.objects.select_related("course").prefetch_related("outline")
         user     = self.request.user
 
         filters = {}
@@ -852,7 +852,11 @@ class CourseOfferingViewSet(ModelViewSet):
         if data is None:
             qs   = Enrollment.objects.filter(
                 course_offering=offering, is_active=True
-            ).select_related("student__user")
+            ).select_related(
+                "student__user",
+                "teaching_slot__teacher__user",
+                "teaching_slot__section",
+            ).prefetch_related("teaching_slot__time_slots")
             data = {
                 "course_code":    offering.course_code,
                 "course_name":    offering.course.name,
@@ -990,6 +994,11 @@ class CourseOfferingViewSet(ModelViewSet):
         check_user_role(request.user, "student")
         student  = request.user.student
 
+        cache_key = CacheKeys.offering_gradebook(offering.id, student.id)
+        cached    = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
+
         # ── Weights ───────────────────────────────────────────────────
         try:
             weights           = offering.grade_weight
@@ -999,7 +1008,7 @@ class CourseOfferingViewSet(ModelViewSet):
             assignment_weight = 50
             quiz_weight       = 50
 
-        # ── Assignments ───────────────────────────────────────────────
+        # ── Assignments ── single query via Prefetch ───────────────────
         assignment_entries        = []
         assignment_marks_obtained = 0
         assignment_marks_total    = 0
@@ -1007,10 +1016,16 @@ class CourseOfferingViewSet(ModelViewSet):
         if assignment_weight > 0:
             assignments = Assignment.objects.filter(
                 course_offering=offering,
-                status=Assignment.StatusChoices.PUBLISHED
+                status=Assignment.StatusChoices.PUBLISHED,
+            ).prefetch_related(
+                Prefetch(
+                    "submissions",
+                    queryset=Submission.objects.filter(student=student).order_by("-submitted_at"),
+                    to_attr="student_submissions",
+                )
             )
             for a in assignments:
-                submission = a.submissions.filter(student=student).first()
+                submission = a.student_submissions[0] if a.student_submissions else None
                 marks      = float(submission.marks_obtained) if submission and submission.is_graded and submission.marks_obtained is not None else None
                 percentage = float(submission.percentage)     if submission and submission.percentage else None
                 assignment_entries.append({
@@ -1028,7 +1043,7 @@ class CourseOfferingViewSet(ModelViewSet):
                     assignment_marks_obtained += marks
                     assignment_marks_total    += a.total_marks
 
-        # ── Quizzes ───────────────────────────────────────────────────
+        # ── Quizzes ── single query via Prefetch + Sum annotation ─────
         quiz_entries        = []
         quiz_marks_obtained = 0
         quiz_marks_total    = 0
@@ -1036,17 +1051,24 @@ class CourseOfferingViewSet(ModelViewSet):
         if quiz_weight > 0:
             quizzes = Quiz.objects.filter(
                 course_offering=offering,
-                status=Quiz.StatusChoices.PUBLISHED
-            )
+                status=Quiz.StatusChoices.PUBLISHED,
+            ).prefetch_related(
+                Prefetch(
+                    "attempts",
+                    queryset=QuizAttempt.objects.filter(student=student).order_by("-marks_obtained"),
+                    to_attr="student_attempts",
+                )
+            ).annotate(_gb_total_marks=Sum("questions__marks"))
             for q in quizzes:
-                attempt    = QuizAttempt.objects.filter(quiz=q, student=student).order_by('-marks_obtained').first()
-                marks      = float(attempt.marks_obtained) if attempt and attempt.marks_obtained is not None else None
-                percentage = float(attempt.percentage)     if attempt and attempt.percentage is not None else None
+                attempt          = q.student_attempts[0] if q.student_attempts else None
+                q_total_marks    = q._gb_total_marks or 0
+                marks            = float(attempt.marks_obtained) if attempt and attempt.marks_obtained is not None else None
+                percentage       = float(attempt.percentage)     if attempt and attempt.percentage is not None else None
                 quiz_entries.append({
                     "id":             q.id,
                     "category":       "Quiz",
                     "title":          q.title,
-                    "total_marks":    q.total_marks,
+                    "total_marks":    q_total_marks,
                     "marks_obtained": marks,
                     "percentage":     percentage,
                     "status":         "graded"    if attempt and attempt.status == QuizAttempt.StatusChoices.GRADED
@@ -1055,7 +1077,7 @@ class CourseOfferingViewSet(ModelViewSet):
                 })
                 if marks is not None:
                     quiz_marks_obtained += marks
-                    quiz_marks_total    += q.total_marks
+                    quiz_marks_total    += q_total_marks
 
         # ── Overall grade (only weight categories that have graded entries) ───
         active_weight  = 0
@@ -1095,7 +1117,9 @@ class CourseOfferingViewSet(ModelViewSet):
         }
 
         serializer = GradebookSerializer(data)
-        return Response(serializer.data)
+        result = serializer.data
+        cache.set(cache_key, result, CACHE_TTL["offering_gradebook"])
+        return Response(result)
 
     @staticmethod
     def _score_to_letter(score: float) -> str:
@@ -1359,8 +1383,9 @@ class ShortAnswerKeyViewSet(ModelViewSet):
     
 class EnrollmentViewSet(ModelViewSet):
     queryset = Enrollment.objects.select_related(
-        "student__user", "course_offering__course"
-    ).all()
+        "student__user", "course_offering__course",
+        "teaching_slot__teacher__user", "teaching_slot__section",
+    ).prefetch_related("teaching_slot__time_slots").all()
     serializer_class = EnrollmentSerializer
 
     def get_permissions(self):
@@ -1375,8 +1400,9 @@ class EnrollmentViewSet(ModelViewSet):
     def get_queryset(self):
         user     = self.request.user
         queryset = Enrollment.objects.select_related(
-            "student__user", "course_offering__course"
-        )
+            "student__user", "course_offering__course",
+            "teaching_slot__teacher__user", "teaching_slot__section",
+        ).prefetch_related("teaching_slot__time_slots")
         if user.is_staff or user.is_superuser:
             return queryset.all()
         if hasattr(user, "student"):
@@ -1465,7 +1491,8 @@ class EnrollmentViewSet(ModelViewSet):
             ).select_related(
                 "course_offering__course",
                 "teaching_slot__teacher__user",
-            )
+                "teaching_slot__section",
+            ).prefetch_related("teaching_slot__time_slots")
             serialized = self.get_serializer(qs, many=True).data
             data = {
                 "term":             current_term.term_number,
@@ -1661,6 +1688,11 @@ class EnrollmentViewSet(ModelViewSet):
 class AssignmentViewSet(ModelViewSet):
     queryset = Assignment.objects.select_related(
         "course_offering__course", "teacher__user"
+    ).annotate(
+        _ann_submission_count=Count("submissions", distinct=True),
+        _ann_graded_submission_count=Count(
+            "submissions", filter=Q(submissions__is_graded=True), distinct=True
+        ),
     ).all()
     serializer_class = AssignmentSerializer
 
@@ -1675,6 +1707,11 @@ class AssignmentViewSet(ModelViewSet):
         user     = self.request.user
         queryset = Assignment.objects.select_related(
             "course_offering__course", "teacher__user"
+        ).annotate(
+            _ann_submission_count=Count("submissions", distinct=True),
+            _ann_graded_submission_count=Count(
+                "submissions", filter=Q(submissions__is_graded=True), distinct=True
+            ),
         )
         if user.is_staff or user.is_superuser:
             return queryset.all()
@@ -1835,7 +1872,9 @@ class QuizViewSet(ModelViewSet):
 
     queryset = Quiz.objects.select_related(
         "course_offering__course", "teacher__user",
-    ).prefetch_related("questions__choices", "questions__answer_keys").all()
+    ).prefetch_related("questions__choices", "questions__answer_keys").annotate(
+        _ann_total_marks=Sum("questions__marks"),
+    ).all()
     serializer_class = QuizSerializer
 
     def get_permissions(self):
@@ -1853,7 +1892,9 @@ class QuizViewSet(ModelViewSet):
         user     = self.request.user
         queryset = Quiz.objects.select_related(
             "course_offering__course", "teacher__user",
-        ).prefetch_related("questions__choices", "questions__answer_keys")
+        ).prefetch_related("questions__choices", "questions__answer_keys").annotate(
+            _ann_total_marks=Sum("questions__marks"),
+        )
 
         if user.is_staff or user.is_superuser:
             return queryset.all()
@@ -1897,11 +1938,16 @@ class QuizViewSet(ModelViewSet):
             student = request.user.student
             response.data = [self._strip_answers(q) for q in response.data]
 
-            # Annotate each quiz with attempts remaining for this student
+            # Batch-fetch attempt counts for all quizzes in one query
+            quiz_ids = [q['id'] for q in response.data]
+            attempt_counts = dict(
+                QuizAttempt.objects.filter(quiz_id__in=quiz_ids, student=student)
+                .values('quiz_id')
+                .annotate(cnt=Count('id'))
+                .values_list('quiz_id', 'cnt')
+            )
             for quiz in response.data:
-                used = QuizAttempt.objects.filter(
-                    quiz_id=quiz['id'], student=student
-                ).count()
+                used = attempt_counts.get(quiz['id'], 0)
                 max_att = quiz.get('max_attempts')
                 quiz['attempts_used']      = used
                 quiz['attempts_remaining'] = (max_att - used) if max_att else None

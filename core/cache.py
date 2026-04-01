@@ -70,6 +70,8 @@ CACHE_TTL = {
     "attempt_detail":       60 * 10,
     "my_attempts":          60 * 10,
     "attempt_result":       60 * 30,
+
+    "offering_gradebook":   60 * 5,         # 5 min – grades can change frequently
 }
 
 
@@ -232,7 +234,7 @@ class CacheKeys:
 
     @staticmethod
     def quiz_detail(quiz_id):
-        return f"quiz_{quiz_id}_detail"
+        return f"lms:quiz:{quiz_id}:detail"
 
     @staticmethod
     def quiz_questions(quiz_id: int) -> str:
@@ -257,6 +259,10 @@ class CacheKeys:
     @staticmethod
     def attempt_result(attempt_id: int) -> str:
         return f"lms:attempt:{attempt_id}:result"
+
+    @staticmethod
+    def offering_gradebook(offering_id: int, student_id: int) -> str:
+        return f"lms:offering:{offering_id}:student:{student_id}:gradebook"
 
     @staticmethod
     def my_attempts(student_id: int, quiz_id="all") -> str:
@@ -367,21 +373,19 @@ def invalidate_assignment_caches(assignment) -> None:
       • The authoring teacher's assignment list
       • Every enrolled student's personal assignment cache
     """
-    from .models import Enrollment, Student  # local import avoids circular deps
+    from .models import Enrollment  # local import avoids circular deps
 
     invalidate_offering_cache(assignment.course_offering_id)
     if assignment.teacher:
         invalidate_teacher_cache(assignment.teacher)
 
-    student_ids = (
+    # student_id is already on the Enrollment row — no need to JOIN back to Student
+    student_ids = list(
         Enrollment.objects
         .filter(course_offering_id=assignment.course_offering_id, is_active=True)
         .values_list("student_id", flat=True)
     )
-    keys = [
-        CacheKeys.student_assignments(sid)
-        for sid in Student.objects.filter(id__in=student_ids).values_list("id", flat=True)
-    ]
+    keys = [CacheKeys.student_assignments(sid) for sid in student_ids]
     if keys:
         cache.delete_many(keys)
 
@@ -411,11 +415,13 @@ def invalidate_submission_caches(submission) -> None:
     """
     Wipe caches affected by a create / update on a Submission.
 
-    Touches the student and the parent offering (which aggregates submission
-    stats on the principal dashboard).
+    Touches the student, the parent offering, and the per-student gradebook
+    for that offering (grades may have changed).
     """
     invalidate_student_cache(submission.student)
-    invalidate_offering_cache(submission.assignment.course_offering_id)
+    offering_id = submission.assignment.course_offering_id
+    invalidate_offering_cache(offering_id)
+    cache.delete(CacheKeys.offering_gradebook(offering_id, submission.student_id))
 
 def invalidate_quiz_caches(quiz) -> None:
     """
@@ -427,7 +433,7 @@ def invalidate_quiz_caches(quiz) -> None:
       • The authoring teacher's quiz list cache
       • Every enrolled student's personal quiz list cache
     """
-    from .models import Enrollment, Student  # local import avoids circular deps
+    from .models import Enrollment  # local import avoids circular deps
 
     keys = [
         CacheKeys.quiz_detail(quiz.id),
@@ -438,15 +444,12 @@ def invalidate_quiz_caches(quiz) -> None:
     cache.delete_many(keys)
     invalidate_offering_cache(quiz.course_offering_id)
 
-    student_ids = (
+    student_ids = list(
         Enrollment.objects
         .filter(course_offering_id=quiz.course_offering_id, is_active=True)
         .values_list("student_id", flat=True)
     )
-    keys = [
-        CacheKeys.student_quizzes(sid)
-        for sid in Student.objects.filter(id__in=student_ids).values_list("id", flat=True)
-    ]
+    keys = [CacheKeys.student_quizzes(sid) for sid in student_ids]
     if keys:
         cache.delete_many(keys)
 
