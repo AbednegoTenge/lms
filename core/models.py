@@ -205,13 +205,13 @@ class CourseOffering(models.Model):
 
     @property
     def progress(self):
-        outlines = self.outline.all()
-        total = outlines.count()
+        # list() uses the prefetch cache when outlines are prefetched (0 extra queries);
+        # falls back to a single DB query when not prefetched (vs. the previous 3 queries).
+        all_outlines = list(self.outline.all())
+        total = len(all_outlines)
         if total == 0:
             return 0
-        completed = outlines.filter(
-            status=CourseOutline.StatusChoices.COMPLETED
-        ).count()
+        completed = sum(1 for o in all_outlines if o.status == CourseOutline.StatusChoices.COMPLETED)
         return round((completed / total) * 100)
 
     class Meta:
@@ -284,9 +284,13 @@ class AcademicTerm(models.Model):
     
     def save(self, *args, **kwargs):
         if self.is_current:
-            # Ensure only one current term
-            AcademicTerm.objects.filter(is_current=True).update(is_current=False)
-        super().save(*args, **kwargs)
+            from django.db import transaction
+            with transaction.atomic():
+                # Exclude self so partial updates don't clear the flag we're setting
+                AcademicTerm.objects.filter(is_current=True).exclude(pk=self.pk).update(is_current=False)
+                super().save(*args, **kwargs)
+        else:
+            super().save(*args, **kwargs)
     
     class Meta:
         ordering = ['-start_date']

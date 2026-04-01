@@ -346,8 +346,17 @@ class EnrollmentSerializer(serializers.ModelSerializer):
 class AssignmentSerializer(serializers.ModelSerializer):
     course_code = serializers.CharField(source='course_offering.course_code', read_only=True)
     teacher_name = serializers.CharField(source='teacher.user.get_full_name', read_only=True)
-    submission_count = serializers.IntegerField(read_only=True)
-    graded_submission_count = serializers.IntegerField(read_only=True)
+    submission_count = serializers.SerializerMethodField()
+    graded_submission_count = serializers.SerializerMethodField()
+
+    def get_submission_count(self, obj):
+        # _ann_submission_count is set by annotated querysets in the viewset
+        ann = getattr(obj, '_ann_submission_count', None)
+        return ann if ann is not None else obj.submissions.count()
+
+    def get_graded_submission_count(self, obj):
+        ann = getattr(obj, '_ann_graded_submission_count', None)
+        return ann if ann is not None else obj.submissions.filter(is_graded=True).count()
     
     class Meta:
         model = Assignment
@@ -405,8 +414,15 @@ class QuestionSerializer(serializers.ModelSerializer):
 class QuizSerializer(serializers.ModelSerializer):
     course_code = serializers.CharField(source='course_offering.course_code', read_only=True)
     teacher_name = serializers.CharField(source='teacher.user.get_full_name', read_only=True)
-    total_marks = serializers.IntegerField(read_only=True)
+    total_marks = serializers.SerializerMethodField()
     questions = QuestionSerializer(many=True, read_only=True)
+
+    def get_total_marks(self, obj):
+        # _ann_total_marks is set by annotated querysets in the viewset;
+        # Sum returns None when no questions exist, so default to 0.
+        if hasattr(obj, '_ann_total_marks'):
+            return obj._ann_total_marks or 0
+        return obj.total_marks  # falls back to the model property
     
     class Meta:
         model = Quiz
